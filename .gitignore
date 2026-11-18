@@ -1,0 +1,17 @@
+# 画像・作品・モデル・ローカル設定は入れない
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.psd
+*.clip
+*.safetensors
+*.ckpt
+*.pt
+*.zip
+works/
+output/
+local/
+*.local.json
+__pycache__/

@@ -1,0 +1,27 @@
+# Page prompt template (black-and-white manga page, one image). Rewrite the PAGE section for each page. For the production flow, draw WITHOUT text and add lines later (skills/03_lettering.md).
+GOAL: ONE image = one finished Japanese manga page (portrait, aspect ratio 2:3) that reads like a real hand-drawn manga page by a professional mangaka, NOT like a row of polished illustrations.
+
+MANGA GRAMMAR (the most important part - follow all of these):
+1. LIGHT PEN STYLE: black-and-white G-pen line art with slightly uneven hand-drawn line weight, few lines, simple faces. Screentone dots only in a few spots (a shadow, a mood background). NO gray gradient shading, NO glossy rendering, NO detailed hair highlights, NO color.
+2. WHITE SPACE: lots of blank white paper. Draw the room background ONLY in panel 1. All other panels have a blank white or simple screentone background.
+3. PANEL RHYTHM: panels of clearly different sizes. One panel is BORDERLESS (no frame, the figure floats on white paper). At least one character or balloon overlaps and breaks out of a panel border. Do not make a tidy grid of equal boxes.
+4. ACTING FACES: do not give every panel a cute "beauty shot" face. Use comedy deformation: dot eyes, flat half-lidded eyes, simple chibi faces in the small reaction panels. Vary camera distance: long shot, medium, close-up.
+5. BALLOONS THAT ACT: normal speech = hand-drawn slightly irregular oval; shout = spiky burst balloon with BIG BOLD text; quiet aside = small balloon with small text. Balloons may overlap panel borders. Text size varies with the volume of the voice.
+6. HANDWRITTEN EXTRAS: small handwritten sound effects and small handwritten side notes outside the balloons, exactly as listed below.
+7. A vertical narration box in panel 1.
+
+TEXT RULES: all Japanese text is vertical (tategaki), spelled EXACTLY as given below, nothing added. Reading order is right to left, top to bottom: within a panel the first speaker and first balloon are on the RIGHT. No logos, no signature, no watermark. Nike-chan's T-shirt letters are hidden by her hoodie.
+
+CHARACTERS (recognizable in every panel even when simplified; reference images: first = Nectalica, second = Nike-chan; use them for design only, NOT for rendering style):
+- Nectalica: long wavy light hair to the middle of the back, braided crown half-updo (thin braid from each temple running to the back of the head) tied with a small bow at the back, big eyes. Frilly dark dress with a high closed collar (no cleavage), long sleeves, dark thigh-high stockings. Neat, perfectionist, polite smile.
+- Nike-chan: dark hair in a HIGH PONYTAIL that is clearly visible in every panel (long tail swinging behind her head) with a hair tie, small hair clip on her bangs shaped as the two capital letters "AI" (this "AI" clip is allowed and required text; draw it in every panel she appears in), ear cuff, open hoodie with a cow-print pattern (large irregular blob-shaped spots, NOT round polka dots) over a T-shirt, shorts. Her hair is deep purple (rendered dark in black and white). Polite, honest and bright.
+AVOID for Nectalica: side braid hanging in front of the shoulder, twin braids, short hair.
+
+PAGE (4 to 6 panels; write for EVERY panel: position and size, camera distance, who is on the right/left, face type, background or blank, exact text):
+P1 - top, wide panel, LONG SHOT with the only real background: <where, who small in frame, what they do>. Vertical narration box at the top right: 「<M月D日、○○の日。>」 Balloon: 「<line>」
+P2 - the BIGGEST panel, BORDERLESS: <the turn / the surprise; what breaks over the border>. Spiky burst balloon with big bold text: 「<line>」 Handwritten sound effect: 「<sfx>」
+P3 - small panel, right: <close-up reaction, deformed face type>. Balloon: 「<line>」 Small handwritten sound effect: 「<sfx>」
+P4 - small panel, left: <answer, chibi>. Balloon: 「<line>」
+P5 - bottom, wide panel: <punchline readable from the picture alone; first speaker on the right>. Balloon: 「<line>」 / retort balloon: 「<line>」 Small handwritten note: 「<note>」
+
+POSE SAFETY: all camera angles are allowed, including low angles (aori) - they are needed for manga. Keep it wholesome: skirts/coats hang closed or the girls wear dark tights, shorts are drawn plainly, no upskirt framing, no front view between raised knees (sit sideways with knees together).

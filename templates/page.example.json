@@ -1,0 +1,29 @@
+{
+  "_comment": "1ページの台本（見本）。box と lines の座標は仕上がり枠に対する %（x, y, w, h）。裁ち切りは bleed に辺の名前で書く（左右が反転しても書き直さない）。",
+  "page": 3,
+  "panels": [
+    {
+      "id": "k1",
+      "order": 1,
+      "box": [4, 3, 92, 30],
+      "bleed": ["top", "outer"],
+      "scene": "Two friends stand back to back in a stone arena, wind blowing their hair",
+      "chars": ["nek", "nike"],
+      "shot": "wide",
+      "engine": "sdxl",
+      "lines": [
+        {"type": "balloon", "who": "nek", "shape": "ellipse", "x": 70, "y": 6, "w": 12, "h": 14, "tail": [62, 16], "size": 2.6, "text": "……来るよ"}
+      ]
+    },
+    {
+      "id": "k2",
+      "order": 2,
+      "box": [52, 35, 44, 62],
+      "scene": "Close-up: she grips the staff and grins",
+      "chars": ["nike"],
+      "shot": "close",
+      "engine": "codex",
+      "lines": []
+    }
+  ]
+}
