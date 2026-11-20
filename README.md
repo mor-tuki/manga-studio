@@ -63,7 +63,7 @@ local/作品 テスト/
 
 | コマンド | 処理 |
 |---|---|
-| `plan <作品> [ページ]` | コマの原寸と正方形の下書きからの拡大率を一覧表示 |
+| `plan <作品> [ページ] [--template]` | コマの原寸と拡大率を一覧表示。指定時は枠と薄い吹き出し予定地を `draft_template.png` に出力（上書きなし） |
 | `cut <作品> <ページ> --draft <PNG> [--overlay] [--pad %] [--derived-from 版JSON]` | 下書きを百分率で切り出し、確認画像も作成 |
 | `draw <作品> <ページ> [id…] --engine <dummy・sdxl・codex> [--seed N] [--size WxH]` | コマを描いて新版に追加。コマ ID を省くと全コマを順に描画 |
 | `redo <作品> <ページ> <id> --scene "新しい場面" [--engine <sdxl・codex>] [--seed N]` | 台本を書き換え、新版と新旧の比較 PNG を作成 |
@@ -130,6 +130,8 @@ python -X utf8 tools/studio.py import "local/作品 テスト" 2 k1 "local/Comfy
 コマごとに必須の `box` が１つ必要で、ID 重複や box 欠落は失敗します。
 任意の `panel_count` があれば実数との一致も確認します。
 下書き画像内のコマの画像認識は行わず、`draft_overlay.png` で目視確認してください。
+生成された枠が白紙テンプレートからずれた場合は、コマの `draft_box: [x, y, w, h]` に下書き画像上の百分率を指定できます。
+`cut` と overlay はその座標を使い、テンプレートと組版は `box` を使います。
 下書きは作品フォルダ内に置き、既存の `draft.png` と overlay は上書きしません。
 切り出し直しには作品を別フォルダにコピーして使ってください。
 

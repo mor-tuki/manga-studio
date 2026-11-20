@@ -129,6 +129,34 @@ class Acceptance(unittest.TestCase):
             self.assertEqual(image.getpixel((96, 72)), (255, 0, 0))
         self.command("cut", 2, "--draft", self.work / "p02" / "draft_source.png", ok=False)
 
+    def test_cut_uses_optional_draft_box_for_crop_and_overlay(self):
+        work = Path(tempfile.mkdtemp(prefix="shifted-draft-", dir=self.work.parent))
+        put(work / "book.json", self.book)
+        panel = dict(self.specs[2]["panels"][0], draft_box=[20, 25, 55, 40])
+        put(work / "p02/page.json", dict(self.specs[2], panels=[panel]))
+        draft = work / "p02/draft_source.png"
+        Image.new("RGB", (800, 600), "white").save(draft)
+        book = studio.Book(work)
+        studio.cut(book, 2, draft, pad=0, overlay=True)
+        with Image.open(work / "p02/panels/k1/draft.png") as crop:
+            self.assertEqual(crop.size, (440, 240))
+        with Image.open(work / "p02/draft_overlay.png") as overlay:
+            self.assertEqual(overlay.getpixel((160, 150)), (255, 0, 0))
+            self.assertEqual(overlay.getpixel((96, 72)), (255, 255, 255))
+
+    def test_plan_template_matches_cut_coordinates_and_omits_lettering(self):
+        path = self.work / "p02" / "draft_template.png"
+        self.command("plan", 2, "--template")
+        with Image.open(path) as template:
+            self.assertEqual(template.mode, "L")
+            self.assertEqual(template.size, (1095, 1536))
+            self.assertEqual(template.getpixel((131, 184)), 0)
+            self.assertEqual(template.getpixel((794, 307)), 212)
+            self.assertEqual(template.getpixel((794, 460)), 255)
+        digest = file_hash(path)
+        self.command("plan", 2, "--template", ok=False)
+        self.assertEqual(file_hash(path), digest)
+
     def test_04_spread_right_is_younger_and_overlap_is_real_art(self):
         with Image.open(self.work / "p04-05" / "page.png") as source:
             self.assertEqual(source.size, (7134, 5102))

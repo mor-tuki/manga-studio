@@ -193,6 +193,8 @@ class Page:
         for panel in self.panels:
             ids.append(identifier(panel["id"]))
             self.validate_box(panel.get("box"), "box")
+            if "draft_box" in panel:
+                self.validate_box(panel["draft_box"], "draft_box")
             require(isinstance(panel.get("bleed", []), list)
                     and set(panel.get("bleed", [])).issubset({"top", "bottom", "outer", "gutter"}),
                     "bleed は top/bottom/outer/gutter の配列です")
@@ -313,7 +315,37 @@ def save_png(image, path, exclusive=False, lineage=None):
         image.save(stream, format="PNG", dpi=(600, 600), pnginfo=info)
 
 
-def plan(book, page=None):
+def draft_rect(box, width, height):
+    x, y, w, h = box
+    return (round(x * width / 100), round(y * height / 100),
+            round((x + w) * width / 100), round((y + h) * height / 100))
+
+
+def draft_template(page):
+    page.validate_lines()
+    height = 1536
+    width = round(page.width * height / page.height)
+    image = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(image)
+    for panel in page.panels:
+        draw.rectangle(draft_rect(panel["box"], width, height), outline=0, width=3)
+    for line in page.lines():
+        kind = line.get("type", "balloon")
+        if kind == "text":
+            continue
+        box = [line["x"], line["y"], line.get("w", 10), line.get("h", 10)]
+        rect = draft_rect(box, width, height)
+        if kind == "caption" or line.get("shape") == "rect":
+            draw.rectangle(rect, outline=212, width=2)
+        else:
+            draw.ellipse(rect, outline=212, width=2)
+    path = page.folder / "draft_template.png"
+    with path.open("xb") as stream:
+        image.save(stream, format="PNG")
+    print(f"OK template {page.folder.name}/draft_template.png ({width}×{height})")
+
+
+def plan(book, page=None, template=False):
     print("page\tid\t原寸 px〔実測:設定から算出〕\t1024×1024 の拡大率〔実測:設定から算出〕")
     for group in book.groups(page):
         p = Page(book, group)
@@ -321,6 +353,9 @@ def plan(book, page=None):
             x, y, r, bot = p.box(panel)
             w, h = r - x, bot - y
             print(f"{p.folder.name}\t{panel['id']}\t{w}×{h}\t{max(w / 1024, h / 1024):.6f}")
+
+        if template:
+            draft_template(p)
 
 
 def cut(book, page, draft, pad=4, overlay=False, parents=()):
@@ -341,15 +376,18 @@ def cut(book, page, draft, pad=4, overlay=False, parents=()):
     marked = image.copy()
     draw = ImageDraw.Draw(marked)
     for panel, target in zip(p.panels, targets):
-        x, y, w, h = panel["box"]
-        # Draft uses its own aspect ratio; no final-canvas pixels are reused.
-        rect = (round(x * image.width / 100), round(y * image.height / 100),
-                round((x + w) * image.width / 100), round((y + h) * image.height / 100))
-        dx, dy = w * pad / 100, h * pad / 100
-        padded = (max(0, math.floor((x - dx) * image.width / 100)),
-                  max(0, math.floor((y - dy) * image.height / 100)),
-                  min(image.width, math.ceil((x + w + dx) * image.width / 100)),
-                  min(image.height, math.ceil((y + h + dy) * image.height / 100)))
+        # Draft uses its own canvas. A shifted generated frame can specify
+        # separate crop coordinates while keeping the intended page layout.
+        box = panel.get("draft_box", panel["box"])
+        rect = draft_rect(box, image.width, image.height)
+        padded = rect
+        if pad:
+            x, y, w, h = box
+            dx, dy = w * pad / 100, h * pad / 100
+            padded = (max(0, math.floor((x - dx) * image.width / 100)),
+                      max(0, math.floor((y - dy) * image.height / 100)),
+                      min(image.width, math.ceil((x + w + dx) * image.width / 100)),
+                      min(image.height, math.ceil((y + h + dy) * image.height / 100)))
         require(padded[2] > padded[0] and padded[3] > padded[1], "下書きのコマが1px未満です")
         target.parent.mkdir(parents=True, exist_ok=True)
         save_png(image.crop(padded), target, exclusive=True, lineage=lineage)
@@ -1113,6 +1151,8 @@ def main(argv=None):
             sub.add_argument("page", type=int, nargs="?")
         elif name != "export":
             sub.add_argument("page", type=int)
+        if name == "plan":
+            sub.add_argument("--template", action="store_true", help="枠と吹き出し予定地の白紙 PNG を出力")
         if name == "cut":
             sub.add_argument("--draft", required=True, type=Path)
             sub.add_argument("--overlay", action="store_true")
@@ -1140,7 +1180,7 @@ def main(argv=None):
     try:
         book = Book(args.work)
         if args.command == "plan":
-            plan(book, args.page)
+            plan(book, args.page, args.template)
         elif args.command == "cut":
             cut(book, args.page, args.draft, args.pad, args.overlay, args.derived_from)
         elif args.command == "draw":
