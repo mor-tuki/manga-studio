@@ -271,6 +271,90 @@ class EngineCommands(unittest.TestCase):
         event = json.loads((self.folder / "log.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual((event["previous_version"], event["engine"]), (1, "sdxl"))
 
+    def test_pick_as_draft_keeps_history_and_sdxl_uses_promoted_version(self):
+        original = self.draft.read_bytes()
+        self.command("draw", "--engine", "dummy", "--size", "64x48")
+        self.command("pick", 1)
+        with patch.object(engines, "run_codex", return_value=png(fill=110)):
+            self.command("redo", "--scene", "構図を描き直す", "--engine", "codex")
+        new = (self.folder / "v2.png").read_bytes()
+
+        self.command("pick", 2)
+        self.assertEqual(self.draft.read_bytes(), original)
+        self.assertTrue(studio.read_json(self.page)["name_ok"])
+        self.command("pick", 2, "--as-draft")
+        self.assertEqual(self.draft.read_bytes(), new)
+        self.assertEqual((self.folder / "draft_v1.png").read_bytes(), original)
+        self.assertEqual(studio.read_json(self.folder / "pick.json"), {"version": 2})
+        self.assertNotIn("name_ok", studio.read_json(self.page))
+
+        with patch.object(engines, "run_sdxl", return_value=png(fill=125)) as run:
+            self.command("draw", "--engine", "sdxl", "--size", "64x48", expected=1)
+            run.assert_not_called()
+            self.assertEqual(studio.main(["approve", str(self.work), "2"]), 0)
+            self.command("pick", 2, "--as-draft")
+            self.assertTrue(studio.read_json(self.page)["name_ok"])
+            self.assertFalse((self.folder / "draft_v2.png").exists())
+            self.command("draw", "--engine", "sdxl", "--size", "64x48")
+            self.assertEqual(next(iter(run.call_args.args[1].values())), new)
+        self.assertIn("p02/panels/k1/v2.json", self.metadata(3)["derived_from"])
+
+        self.command("pick", 1, "--as-draft")
+        self.assertEqual((self.folder / "draft_v2.png").read_bytes(), new)
+        self.assertEqual((self.folder / "draft_v1.png").read_bytes(), original)
+        self.assertEqual((self.folder / "v2.png").read_bytes(), new)
+
+    def test_review_prefers_picked_version_then_panel_then_page_draft(self):
+        self.spec["panels"][0].update(box=[10, 10, 25, 25], order=2)
+        self.spec["panels"].append({"id": "k2", "box": [40, 10, 25, 25], "order": 1})
+        studio.write_json(self.page, self.spec)
+        second = self.folder.parent / "k2"
+        second.mkdir()
+        (second / "draft.png").write_bytes(png(fill=170))
+        source = self.work / "first-version.png"
+        source.write_bytes(png(fill=40))
+        self.command("import", source)
+        self.command("pick", 1)
+        source.write_bytes(png(fill=60))
+        self.command("import", source)
+
+        review_args = ["review", str(self.work), "2"]
+        lettered = self.page.parent / "review_name.png"
+        self.assertEqual(studio.main(review_args), 0)
+        with Image.open(lettered) as image:
+            self.assertEqual(image.getpixel((image.width // 5, image.height // 5)), 40)
+            self.assertEqual(image.getpixel((image.width // 2, image.height // 5)), 170)
+            self.assertEqual(studio.png_metadata(image, "manga_studio")["derived_from"],
+                             ["p02/panels/k1/v1.json"])
+
+        self.spec["panels"].append({"id": "k3", "box": [70, 10, 25, 25], "order": 3})
+        studio.write_json(self.page, self.spec)
+        page_source = self.page.parent / "draft_source.png"
+        page_source.write_bytes(png((800, 600), fill=215))
+        book = studio.Book(self.work)
+        canvas, labels, _ = studio.review_canvas(studio.Page(book, [2]), None, (), ())
+        self.assertEqual([item[1:] for item in labels], [(2, "v1"), (1, "下書き"), (3, "下書き")])
+        self.assertEqual([canvas.getpixel((x, 120))[0] for x in (160, 400, 640)], [40, 170, 215])
+
+    def test_review_and_draft_promotion_reject_ph3_for_sns(self):
+        source = self.work / "ph3.png"
+        source.write_bytes(png(fill=150))
+        self.command("import", source, "--ph3")
+        self.command("pick", 1)
+        review_args = ["review", str(self.work), "2"]
+        self.assertEqual(studio.main(review_args), 0)
+        lettered = self.page.parent / "review_name.png"
+        with Image.open(lettered) as image:
+            self.assertTrue(studio.png_metadata(image, "manga_studio")["contains_ph3"])
+        old_review = lettered.read_bytes()
+        old_draft = self.draft.read_bytes()
+        studio.write_json(self.book_path, dict(studio.read_json(self.book_path), publish=["x"]))
+        self.assertEqual(studio.main(review_args), 1)
+        self.command("pick", 1, "--as-draft", expected=1)
+        self.assertEqual(lettered.read_bytes(), old_review)
+        self.assertEqual(self.draft.read_bytes(), old_draft)
+        self.assertTrue(studio.read_json(self.page)["name_ok"])
+
     def test_comfy_exports_editable_graph_and_import_preserves_png(self):
         self.spec["panels"][0]["sdxl"] = {"denoise": 0.65}
         studio.write_json(self.page, self.spec)

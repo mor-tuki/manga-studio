@@ -15,7 +15,7 @@ import time
 from uuid import uuid4
 import zipfile
 
-from PIL import Image, ImageChops, ImageDraw, PngImagePlugin
+from PIL import Image, ImageChops, ImageDraw, ImageOps, PngImagePlugin
 
 try:
     from . import engines
@@ -378,45 +378,84 @@ def review_png(image, lineage):
         require(image.size != (1, 1), "来歴を含めると確認画像が1MBを超えます")
 
 
-def review(book, page, draft=None, parents=()):
-    p = Page(book, book.group(page))
-    p.validate_lines()
-    paths = [inside(p.folder, name) for name in ("review_name.png", "review_overlay.png")]
+def review_canvas(p, draft, parents, paths):
+    book = p.book
+    explicit_draft = draft is not None
     draft = draft.resolve() if draft is not None else inside(p.folder, "draft_source.png")
     require(draft.is_relative_to(book.root), "下書きは作品フォルダ内に置いてください")
     require(draft not in paths, "確認画像を下書きに指定できません")
-    require(draft.is_file(), "下書きがありません。draft_source.png を置くか --draft で指定してください")
-    data = draft.read_bytes()
-    lineage = image_lineage(book, draft, parents, data)
-    verify_generation_policy(book, None, lineage["contains_ph3"])
-    with Image.open(BytesIO(data)) as source:
-        require(source.format == "PNG", "下書きは PNG で指定してください")
-        source = source.convert("RGBA")
-    source.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGBA", source.size, "white")
-    canvas.alpha_composite(source)
+    has_page_draft = draft.is_file()
+    require(has_page_draft or not explicit_draft, "--draft で指定した下書きがありません")
 
-    try:
-        from .lettering import render_layer
-    except ImportError:
-        from lettering import render_layer
-    layer, _ = render_layer(p, draft_size=canvas.size)
-    layer.putalpha(layer.getchannel("A").point(lambda value: round(value * 0.64)))
-    lettered = Image.alpha_composite(canvas, layer).convert("L")
+    origins = []
 
-    marked = canvas.convert("L").convert("RGB")
-    draw = ImageDraw.Draw(marked)
-    font_size = max(12, min(marked.size) // 37)
+    def read_art(path, parents=()):
+        data = path.read_bytes()
+        origins.append(image_lineage(book, path, parents, data))
+        with Image.open(BytesIO(data)) as image:
+            require(image.format == "PNG", "下書き・選択版は PNG で指定してください")
+            art = Image.new("RGBA", image.size, "white")
+            art.alpha_composite(image.convert("RGBA"))
+            return art
+
+    if has_page_draft:
+        canvas = read_art(draft, parents)
+        canvas.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+    else:
+        scale = 2000 / max(p.width, p.height)
+        canvas = Image.new("RGBA", (round(p.width * scale), round(p.height * scale)), "white")
+        origins.append(lineage_record(book, parents))
+
+    labels = []
     for index, panel in enumerate(p.panels, start=1):
-        rect = draft_rect(panel.get("draft_box", panel["box"]), *marked.size)
-        draw.rectangle(rect, outline="#be2727", width=max(1, font_size // 10))
-        draw.text((rect[0] + 4, rect[1] + 2), str(panel.get("order", index)),
-                  fill="#a61717", stroke_width=max(1, font_size // 10),
-                  stroke_fill="white", font_size=font_size)
-    outputs = [review_png(image, lineage) for image in (lettered, marked)]
-    for path, output in zip(paths, outputs):
-        atomic_bytes(path, output)
-        print(f"OK review {path} ({len(output):,} bytes)")
+        panel_id = panel["id"]
+        folder = p.panel_dir(panel_id)
+        selection = folder / "pick.json"
+        label = "下書き"
+        art_path = inside(folder, "draft.png")
+        picked = selection.exists()
+        if picked:
+            version = read_json(selection)["version"]
+            art_path, _, _ = version_record(p, panel_id, version)
+            label = f"v{version}"
+        rect = draft_rect(panel.get("draft_box", panel["box"]), *canvas.size)
+        left, top, right, bottom = rect
+        require(right > left and bottom > top, f"{panel_id}: 確認画像のコマが1px未満です")
+        if picked or art_path.is_file():
+            art = read_art(art_path)
+            fitted = ImageOps.fit(art, (right - left, bottom - top), Image.Resampling.LANCZOS)
+            canvas.paste(fitted, (left, top))
+        else:
+            require(has_page_draft, f"{panel_id}: 下書きがありません。draft_source.png を置くか --draft で指定してください")
+        labels.append((rect, panel.get("order", index), label))
+
+    lineage = {"derived_from": list(dict.fromkeys(path for origin in origins for path in origin["derived_from"])),
+               "contains_ph3": any(origin["contains_ph3"] for origin in origins)}
+    verify_generation_policy(book, None, lineage["contains_ph3"])
+    return canvas, labels, lineage
+
+
+def review(book, page, draft=None, parents=()):
+    group = book.group(page)
+    p = Page(book, group)
+    with engines.exclusive_edit(p.folder / ".redo.lock", "このページを編集中です"):
+        p = Page(book, group)
+        p.validate_lines()
+        paths = [inside(p.folder, name) for name in ("review_name.png", "review_overlay.png")]
+        canvas, labels, lineage = review_canvas(p, draft, parents, paths)
+
+        try:
+            from .lettering import render_layer
+        except ImportError:
+            from lettering import render_layer
+        layer, marks = render_layer(p, draft_size=canvas.size, review_labels=labels)
+        layer.putalpha(layer.getchannel("A").point(lambda value: round(value * 0.64)))
+        lettered = Image.alpha_composite(canvas, layer).convert("L")
+        marked = Image.alpha_composite(canvas.convert("L").convert("RGBA"), marks).convert("RGB")
+        outputs = [review_png(image, lineage) for image in (lettered, marked)]
+        for path, output in zip(paths, outputs):
+            atomic_bytes(path, output)
+            print(f"OK review {path} ({len(output):,} bytes)")
 
 
 def require_name_ok(page, force):
@@ -597,11 +636,37 @@ def version_record(p, panel_id, k):
     return art, meta, record
 
 
-def pick(book, page, panel_id, k):
-    p = Page(book, book.group(page))
-    require(p.panel(panel_id) is not None, "存在しないコマです")
-    version_record(p, panel_id, k)
-    write_json(p.panel_dir(panel_id) / "pick.json", {"version": k})
+def promote_draft(p, panel_id, art):
+    data = art.read_bytes()
+    png_size(data)
+    lineage = image_lineage(p.book, art, data=data)
+    verify_generation_policy(p.book, None, lineage["contains_ph3"])
+    folder = p.panel_dir(panel_id)
+    draft = inside(folder, "draft.png")
+    original = draft.read_bytes() if draft.exists() else None
+    if original == data:
+        return
+    if original is not None:
+        number = 1
+        while (folder / f"draft_v{number}.png").exists():
+            number += 1
+        # An interrupted attempt may already have saved this backup.
+        if number == 1 or (folder / f"draft_v{number - 1}.png").read_bytes() != original:
+            atomic_bytes(folder / f"draft_v{number}.png", original)
+    if "name_ok" in p.data:
+        del p.data["name_ok"]
+        atomic_json(p.path, p.data)
+    atomic_bytes(draft, data)
+
+
+def pick(book, page, panel_id, k, as_draft=False):
+    p, _ = load_panel(book, page, panel_id)
+    with engines.exclusive_edit(p.folder / ".redo.lock", "このページを編集中です"):
+        p, _ = load_panel(book, page, panel_id)
+        art, _, _ = version_record(p, panel_id, k)
+        if as_draft:
+            promote_draft(p, panel_id, art)
+        atomic_json(p.panel_dir(panel_id) / "pick.json", {"version": k})
     print(f"OK pick {p.folder.name}/{panel_id} v{k}")
 
 
@@ -1327,6 +1392,7 @@ def main(argv=None):
             sub.add_argument("--ph3", action="store_true", help="来歴情報を持たない P-H3 由来 PNG")
         if name == "pick":
             sub.add_argument("version", type=int)
+            sub.add_argument("--as-draft", action="store_true", help="選んだ版でコマの下書きを差し替え")
     args = parser.parse_args(argv)
     try:
         book = Book(args.work)
@@ -1347,7 +1413,7 @@ def main(argv=None):
         elif args.command == "import":
             import_panel(book, args.page, args.id, args.png, args.derived_from, args.ph3)
         elif args.command == "pick":
-            pick(book, args.page, args.id, args.version)
+            pick(book, args.page, args.id, args.version, args.as_draft)
         elif args.command == "build":
             build(book, args.page, args.force)
         elif args.command == "check":

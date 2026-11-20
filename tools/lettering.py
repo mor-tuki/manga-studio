@@ -35,7 +35,7 @@ def finite(value):
     return value
 
 
-def build_html(page, draft_size=None):
+def build_html(page, draft_size=None, review_labels=None):
     if draft_size is None:
         W, H, tw, th = page.width, page.height, page.trim_width, page.book.th
         bleed = page.book.bleed
@@ -107,6 +107,21 @@ def build_html(page, draft_size=None):
             divs.append(f'<div class="t{horizontal}" data-line="{index}" '
                         f'style="left:{x}px;top:{y}px;width:{w}px;height:{h}px;'
                         f'font-size:{size}px;color:{ink};font-weight:{weight}"><span>{text}</span></div>')
+    labels = ""
+    if review_labels is not None:
+        size = max(12, min(W, H) // 37)
+        stroke = max(1, size // 10)
+        parts = []
+        for (left, top, right, bottom), order, source in review_labels:
+            parts.append(f'<rect x="{left + 0.5}" y="{top + 0.5}" width="{right - left}" '
+                         f'height="{bottom - top}" fill="none" stroke="#be2727" '
+                         f'stroke-width="{stroke}" shape-rendering="crispEdges"/>')
+            parts.append(f'<text x="{left + 4}" y="{top + size + 2}" font-size="{size}" '
+                         f'fill="#a61717" stroke="white" stroke-width="{stroke}" '
+                         f'paint-order="stroke" font-weight="700">{order} '
+                         f'<tspan font-size="72%">{html.escape(source)}</tspan></text>')
+        labels = (f'<div id="review-labels" hidden><svg width="{W}" height="{H}">'
+                  f'{"".join(parts)}</svg></div>')
     return f'''<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{{margin:0;padding:0;background:transparent}}
 #page{{position:relative;width:{W}px;height:{H}px;overflow:hidden;
@@ -118,10 +133,10 @@ letter-spacing:.02em;white-space:nowrap;font-feature-settings:'vert'}}
 .h span{{writing-mode:horizontal-tb;text-align:center;line-height:1.35;font-feature-settings:normal}}
 .free{{position:absolute;transform-origin:center}}
 </style></head><body><div id="page"><svg width="{W}" height="{H}" viewBox="0 0 {W} {H}">
-{''.join(svg)}</svg>{''.join(divs)}</div></body></html>'''
+{''.join(svg)}</svg>{''.join(divs)}{labels}</div></body></html>'''
 
 
-def render_layer(page, draft_size=None):
+def render_layer(page, draft_size=None, review_labels=None):
     from playwright.sync_api import sync_playwright
 
     # Runtime files stay in ignored repository-local storage. Nothing is downloaded.
@@ -139,11 +154,20 @@ def render_layer(page, draft_size=None):
                                        device_scale_factor=1, locale="ja-JP")
                 tab.route("**/*", lambda route: route.abort())
                 tab.set_default_timeout(30000)
-                tab.set_content(build_html(page, draft_size), wait_until="load")
+                tab.set_content(build_html(page, draft_size, review_labels), wait_until="load")
                 tab.evaluate("() => document.fonts.ready")
                 if draft_size is not None:
                     data = tab.screenshot(type="png", omit_background=True, animations="disabled", timeout=30000)
-                    return Image.open(io.BytesIO(data)).convert("RGBA"), []
+                    layer = Image.open(io.BytesIO(data)).convert("RGBA")
+                    if review_labels is None:
+                        return layer, []
+                    tab.locator("#review-labels").evaluate("""labels => {
+                        labels.parentNode.replaceChildren(labels);
+                        labels.hidden = false;
+                        return document.fonts.ready;
+                    }""")
+                    data = tab.screenshot(type="png", omit_background=True, animations="disabled", timeout=30000)
+                    return layer, Image.open(io.BytesIO(data)).convert("RGBA")
                 measured = tab.evaluate('''() => [...document.querySelectorAll('[data-line]')].map(d => {
                     const s = d.firstElementChild.getBoundingClientRect(), b = d.getBoundingClientRect();
                     const stroke = parseFloat(getComputedStyle(d).webkitTextStrokeWidth) || 0;

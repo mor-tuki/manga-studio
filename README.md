@@ -71,7 +71,7 @@ local/作品 テスト/
 | `redo <作品> <ページ> <id> --scene "新しい場面" [--engine <sdxl・codex>] [--seed N] [--force]` | 台本を書き換え、新版と新旧の比較 PNG を作成 |
 | `comfy <作品> <ページ> <id> [--seed N] [--size WxH]` | ComfyUI で編集できる SDXL I2I のワークフロー JSON と入力 PNG を書き出す |
 | `import <作品> <ページ> <id> <PNG> [--derived-from 版JSON] [--ph3]` | ComfyUI で保存した PNG を新版として取り込む |
-| `pick <作品> <ページ> <id> <K>` | 使用する版を選択 |
+| `pick <作品> <ページ> <id> <K> [--as-draft]` | 使用する版を選択。指定時はコマの下書きも選んだ版に差し替え |
 | `build <作品> <ページ> [--force]` | 原寸の組版・枠線・写植と履歴の記録 |
 | `check <作品> [ページ]` | 入稿仕様・安全域・鮮度・拡大率・派生元と公開先を検査 |
 | `export <作品>` | 全ページの検査後に連番 PNG・ZIP・提出メモを生成 |
@@ -94,10 +94,11 @@ python -X utf8 tests/run_acceptance.py
 
 ### ネーム確認
 
-下書き PNG をページフォルダの `draft_source.png` に置きます。別名や別の場所にある作品内の PNG は `--draft` で指定できます。
-`review` は、セリフと語りを薄く重ねた `review_name.png` と、読む順の番号と枠を重ねた `review_overlay.png` をページフォルダに出力します。どちらも長辺2000px以下・1MB以下で、再実行すると更新します。
+`review` はコマごとに `pick` した版、切り出し済みの `draft.png`、ページ全体の下書きの順で使います。ページ全体の下書きは `draft_source.png` に置くか、作品内の別の PNG を `--draft` で指定します。全コマの素材がそろっていればページ全体の下書きは省略できます。
+セリフと語りを薄く重ねた `review_name.png` と、読む順の番号・枠・素材（「下書き」または「v5」など）を入れた `review_overlay.png` をページフォルダに出力します。どちらも長辺2000px以下・1MB以下で、再実行すると更新します。
 全ページの確認画像をそろえ、ツキの OK を受けてから各ページで `approve` を実行します。
 `name_ok` が未設定または `false` のページでは、SDXL での描画・描き直しと `build` が警告して停止します。`--force` はその実行だけ確認を省略できます。
+`redo --engine codex` で構図を描き直した版を清書の下絵に使うには、`pick <作品> <ページ> <id> <K> --as-draft` を実行します。元の下絵は `draft_v1.png` から連番で保存し、新しい `draft.png` を SDXL I2I に渡します。下絵が変わると `name_ok` が外れるので、`review` で確認し直してから `approve` します。
 
 ### メンバーの PC でコマを描く
 
