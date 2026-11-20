@@ -32,6 +32,10 @@ class StudioError(ValueError):
     pass
 
 
+class NameApprovalRequired(StudioError):
+    pass
+
+
 def require(ok, message):
     if not ok:
         raise StudioError(message)
@@ -306,13 +310,17 @@ def open_image(path):
         return source.copy()
 
 
-def save_png(image, path, exclusive=False, lineage=None):
-    info = None
+def png_lineage_info(lineage):
     if lineage and (lineage["contains_ph3"] or lineage["derived_from"]):
         info = PngImagePlugin.PngInfo()
         info.add_text("manga_studio", json.dumps(lineage, ensure_ascii=True))
+        return info
+    return None
+
+
+def save_png(image, path, exclusive=False, lineage=None):
     with Path(path).open("xb" if exclusive else "wb") as stream:
-        image.save(stream, format="PNG", dpi=(600, 600), pnginfo=info)
+        image.save(stream, format="PNG", dpi=(600, 600), pnginfo=png_lineage_info(lineage))
 
 
 def draft_rect(box, width, height):
@@ -356,6 +364,75 @@ def plan(book, page=None, template=False):
 
         if template:
             draft_template(p)
+
+
+def review_png(image, lineage):
+    pnginfo = png_lineage_info(lineage)
+    while True:
+        output = BytesIO()
+        image.save(output, format="PNG", optimize=True, pnginfo=pnginfo)
+        if output.tell() <= 1_000_000:
+            return output.getvalue()
+        image.thumbnail((max(1, image.width * 4 // 5), max(1, image.height * 4 // 5)),
+                        Image.Resampling.LANCZOS)
+        require(image.size != (1, 1), "来歴を含めると確認画像が1MBを超えます")
+
+
+def review(book, page, draft=None, parents=()):
+    p = Page(book, book.group(page))
+    p.validate_lines()
+    paths = [inside(p.folder, name) for name in ("review_name.png", "review_overlay.png")]
+    draft = draft.resolve() if draft is not None else inside(p.folder, "draft_source.png")
+    require(draft.is_relative_to(book.root), "下書きは作品フォルダ内に置いてください")
+    require(draft not in paths, "確認画像を下書きに指定できません")
+    require(draft.is_file(), "下書きがありません。draft_source.png を置くか --draft で指定してください")
+    data = draft.read_bytes()
+    lineage = image_lineage(book, draft, parents, data)
+    verify_generation_policy(book, None, lineage["contains_ph3"])
+    with Image.open(BytesIO(data)) as source:
+        require(source.format == "PNG", "下書きは PNG で指定してください")
+        source = source.convert("RGBA")
+    source.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", source.size, "white")
+    canvas.alpha_composite(source)
+
+    try:
+        from .lettering import render_layer
+    except ImportError:
+        from lettering import render_layer
+    layer, _ = render_layer(p, draft_size=canvas.size)
+    layer.putalpha(layer.getchannel("A").point(lambda value: round(value * 0.64)))
+    lettered = Image.alpha_composite(canvas, layer).convert("L")
+
+    marked = canvas.convert("L").convert("RGB")
+    draw = ImageDraw.Draw(marked)
+    font_size = max(12, min(marked.size) // 37)
+    for index, panel in enumerate(p.panels, start=1):
+        rect = draft_rect(panel.get("draft_box", panel["box"]), *marked.size)
+        draw.rectangle(rect, outline="#be2727", width=max(1, font_size // 10))
+        draw.text((rect[0] + 4, rect[1] + 2), str(panel.get("order", index)),
+                  fill="#a61717", stroke_width=max(1, font_size // 10),
+                  stroke_fill="white", font_size=font_size)
+    outputs = [review_png(image, lineage) for image in (lettered, marked)]
+    for path, output in zip(paths, outputs):
+        atomic_bytes(path, output)
+        print(f"OK review {path} ({len(output):,} bytes)")
+
+
+def require_name_ok(page, force):
+    if page.data.get("name_ok") is not True and not force:
+        raise NameApprovalRequired("ネーム未承認です。review で確認後に approve を実行してください。"
+                                   "確認を省くときは --force を指定できます")
+
+
+def approve(book, page):
+    p = Page(book, book.group(page))
+    with engines.exclusive_edit(p.folder / ".redo.lock", "このページを編集中です"):
+        p = Page(book, p.group)
+        if p.data.get("name_ok") is not True:
+            p.data["name_ok"] = True
+            atomic_json(p.path, p.data)
+    print(f"OK approve {p.folder.name} name_ok")
 
 
 def cut(book, page, draft, pad=4, overlay=False, parents=()):
@@ -758,11 +835,13 @@ def sampler_settings(graph):
     return result
 
 
-def draw(book, page, ids, engine, seed=None, size=None):
+def draw(book, page, ids, engine, seed=None, size=None, force=False):
     if engine == "dummy":
         return draw_dummy(book, page, ids, seed, size)
     require(engine in ("sdxl", "codex"), "未対応の描画エンジンです")
     p = Page(book, book.group(page))
+    if engine == "sdxl":
+        require_name_ok(p, force)
     ids = ids or [panel["id"] for panel in p.panels]
     require(len(ids) == len(set(ids)), "コマ指定が重複しています")
     tasks = []
@@ -787,6 +866,7 @@ def draw(book, page, ids, engine, seed=None, size=None):
                         in zip(payload, record["references_sha256"].values())),
                     "描画の準備中に参照画像が変更されました。やり直してください")
             art = engines.run_codex(record["prompt"], payload, book.root)
+            art = trim_panel_frame(art)
         actual = png_size(art)
         if engine == "sdxl":
             require(list(actual) == record["size"], "ComfyUI の出力寸法が指定と一致しません")
@@ -807,13 +887,77 @@ def png_size(data):
         return image.size
 
 
-def atomic_json(path, value):
+def frame_edge(image, vertical, reverse, depth, max_line):
+    width, height = image.size
+    span = (height if vertical else width) - 2 * depth
+    axis = width if vertical else height
+    thickness = 0
+    outer_transition = False
+    for offset in range(depth + 1):
+        pos = axis - 1 - offset if reverse else offset
+        strip = image.crop((pos, depth, pos + 1, height - depth) if vertical
+                           else (depth, pos, width - depth, pos + 1))
+        histogram = strip.histogram()
+        if (sum(histogram[:161]) >= span * 0.96
+                and sum(histogram[:96]) >= span * 0.80):
+            thickness += 1
+            if thickness > max_line:
+                return 0
+        elif thickness:
+            # A soft inside edge can be one more antialiased pixel.
+            return offset + (sum(histogram[:161]) >= span * 0.80)
+        elif outer_transition:
+            return 0
+        elif sum(histogram[220:]) < span * 0.97:
+            # Permit one transition pixel between the white margin and the ink.
+            outer_transition = True
+    return 0
+
+
+def trim_panel_frame(data):
+    with Image.open(BytesIO(data)) as image:
+        require(image.format == "PNG", "画像は PNG で指定してください")
+        width, height = image.size
+        short = min(width, height)
+        if short < 32:
+            return data
+        gray = image.convert("L")
+        depth = min(48, max(4, round(short * 0.03)))
+        max_line = max(2, round(short * 0.012))
+        # Require a thin, straight line on all four sides to avoid cutting
+        # intentional ink or white background that meets one edge.
+        left, top, right, bottom = (
+            frame_edge(gray, vertical, reverse, depth, max_line)
+            for vertical, reverse in ((True, False), (False, False), (True, True), (False, True))
+        )
+        if not all((left, top, right, bottom)):
+            return data
+        cropped = image.crop((left, top, width - right, height - bottom))
+        info = PngImagePlugin.PngInfo()
+        for key, value in image.text.items():
+            if isinstance(value, PngImagePlugin.iTXt):
+                info.add_itxt(key, value, value.lang, value.tkey)
+            else:
+                info.add_text(key, value)
+        options = {key: image.info[key] for key in ("dpi", "icc_profile", "transparency", "exif")
+                   if key in image.info}
+        output = BytesIO()
+        cropped.save(output, format="PNG", pnginfo=info, **options)
+        return output.getvalue()
+
+
+def atomic_bytes(path, data):
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        write_json(temporary, value, exclusive=True)
+        with temporary.open("xb") as stream:
+            stream.write(data)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def atomic_json(path, value):
+    atomic_bytes(path, json_bytes(value))
 
 
 def comfy(book, page, panel_id, seed=None, size=None):
@@ -835,10 +979,11 @@ def import_panel(book, page, panel_id, path, parents=(), ph3=False):
     started = time.monotonic()
     p, panel = load_panel(book, page, panel_id)
     art = path.read_bytes()
-    size = png_size(art)
     lineage = image_lineage(book, path.resolve(), parents, art)
     lineage["contains_ph3"] |= ph3
     verify_generation_policy(book, None, lineage["contains_ph3"])
+    art = trim_panel_frame(art)
+    size = png_size(art)
     with Image.open(BytesIO(art)) as image:
         graph = png_metadata(image, "prompt")
     record = {"engine": "comfy", "source": "comfy", "size": list(size), "seed": None,
@@ -863,7 +1008,7 @@ def previous_version(p, panel_id):
     return version, version_record(p, panel_id, version)[0]
 
 
-def redo(book, page, panel_id, scene, engine=None, seed=None):
+def redo(book, page, panel_id, scene, engine=None, seed=None, force=False):
     p, panel = load_panel(book, page, panel_id)
     require(scene.strip(), "scene を空にはできません")
     with engines.exclusive_edit(p.folder / ".redo.lock", "このページの redo が実行中です"):
@@ -875,13 +1020,15 @@ def redo(book, page, panel_id, scene, engine=None, seed=None):
         verify_generation_policy(book, None, old_ph3)
         engine = engine or panel.get("engine", "sdxl")
         require(engine in ("sdxl", "codex"), "redo の engine は sdxl または codex を指定してください")
+        if engine == "sdxl":
+            require_name_ok(p, force)
         before = panel.get("scene")
         panel["scene"] = scene
         atomic_json(p.path, p.data)
         folder = p.panel_dir(panel_id)
         log_panel(folder, {"event": "redo", "scene_before": before, "scene_after": scene,
                            "previous_version": previous, "engine": engine})
-        version, = draw(book, page, [panel_id], engine, seed)
+        version, = draw(book, page, [panel_id], engine, seed, force=force)
         new_art, new_meta, _ = version_record(p, panel_id, version)
         new_ph3, _ = ancestry(book, new_meta.relative_to(book.root).as_posix())
         images = [open_image(path).convert("RGB") for path in (previous_art, new_art)]
@@ -968,8 +1115,9 @@ def check_attribution(p, contains_ph3=False):
         require(notice in text, "安全域の lines に必要な表示がありません: " + notice)
 
 
-def build(book, page):
+def build(book, page, force=False):
     p = Page(book, book.group(page))
+    require_name_ok(p, force)
     p.validate_lines()
     snapshot = inputs(p, warn=True)
     check_attribution(p, snapshot["contains_ph3"])
@@ -1144,7 +1292,7 @@ def parse_size(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="漫画の描画・描き直しと原寸グレー原稿の書き出し")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "check", "export", "cut", "draw", "redo", "comfy", "import", "pick", "build"):
+    for name in ("plan", "review", "approve", "check", "export", "cut", "draw", "redo", "comfy", "import", "pick", "build"):
         sub = commands.add_parser(name)
         sub.add_argument("work", type=Path)
         if name in ("plan", "check"):
@@ -1153,8 +1301,9 @@ def main(argv=None):
             sub.add_argument("page", type=int)
         if name == "plan":
             sub.add_argument("--template", action="store_true", help="枠と吹き出し予定地の白紙 PNG を出力")
+        if name in ("cut", "review"):
+            sub.add_argument("--draft", required=name == "cut", type=Path)
         if name == "cut":
-            sub.add_argument("--draft", required=True, type=Path)
             sub.add_argument("--overlay", action="store_true")
             sub.add_argument("--pad", type=float, default=4)
         if name == "draw":
@@ -1169,8 +1318,10 @@ def main(argv=None):
             sub.add_argument("--seed", type=int)
         if name in ("draw", "comfy"):
             sub.add_argument("--size", type=parse_size)
-        if name in ("cut", "import"):
+        if name in ("cut", "import", "review"):
             sub.add_argument("--derived-from", action="append", default=[], metavar="VERSION_JSON")
+        if name in ("draw", "redo", "build"):
+            sub.add_argument("--force", action="store_true", help="ネーム未承認でも今回の処理を実行")
         if name == "import":
             sub.add_argument("png", type=Path)
             sub.add_argument("--ph3", action="store_true", help="来歴情報を持たない P-H3 由来 PNG")
@@ -1181,12 +1332,16 @@ def main(argv=None):
         book = Book(args.work)
         if args.command == "plan":
             plan(book, args.page, args.template)
+        elif args.command == "review":
+            review(book, args.page, args.draft, args.derived_from)
+        elif args.command == "approve":
+            approve(book, args.page)
         elif args.command == "cut":
             cut(book, args.page, args.draft, args.pad, args.overlay, args.derived_from)
         elif args.command == "draw":
-            draw(book, args.page, args.ids, args.engine, args.seed, args.size)
+            draw(book, args.page, args.ids, args.engine, args.seed, args.size, args.force)
         elif args.command == "redo":
-            redo(book, args.page, args.id, args.scene, args.engine, args.seed)
+            redo(book, args.page, args.id, args.scene, args.engine, args.seed, args.force)
         elif args.command == "comfy":
             comfy(book, args.page, args.id, args.seed, args.size)
         elif args.command == "import":
@@ -1194,12 +1349,15 @@ def main(argv=None):
         elif args.command == "pick":
             pick(book, args.page, args.id, args.version)
         elif args.command == "build":
-            build(book, args.page)
+            build(book, args.page, args.force)
         elif args.command == "check":
             check(book, args.page)
         else:
             export(book)
         return 0
+    except NameApprovalRequired as exc:
+        print(f"警告: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return 1

@@ -35,18 +35,21 @@ def finite(value):
     return value
 
 
-def build_html(page):
-    b = page.book
-    W, H, tw, th = page.width, page.height, page.trim_width, b.th
+def build_html(page, draft_size=None):
+    if draft_size is None:
+        W, H, tw, th = page.width, page.height, page.trim_width, page.book.th
+        bleed = page.book.bleed
+    else:
+        W, H = tw, th = draft_size
+        bleed = 0
     font = page.data.get("font", "Noto Sans JP")
     if not isinstance(font, str) or not re.fullmatch(r"[\w \-]+", font):
         raise ValueError("font はフォント名だけを指定してください")
     svg, divs = [], []
-    # Stroke widths and font sizes are based on trim width, never the draft.
     sw = max(2, tw * 0.0028)
     for index, item in enumerate(page.lines()):
         kind = item.get("type", "balloon")
-        x, y = b.bleed + item["x"] * tw / 100, b.bleed + item["y"] * th / 100
+        x, y = bleed + item["x"] * tw / 100, bleed + item["y"] * th / 100
         w, h = item.get("w", 10) * tw / 100, item.get("h", 10) * th / 100
         size = item.get("size", 2.4) * tw / 100
         ink = color(item.get("color", "#111"))
@@ -59,7 +62,7 @@ def build_html(page):
             shape = item.get("shape", "ellipse")
             tail = item.get("tail")
             if tail:
-                tx, ty = b.bleed + tail[0] * tw / 100, b.bleed + tail[1] * th / 100
+                tx, ty = bleed + tail[0] * tw / 100, bleed + tail[1] * th / 100
                 angle = math.atan2(ty - cy, tx - cx)
                 half = finite(item.get("tail_width", 0.22))
                 if half <= 0 or half > 1:
@@ -118,7 +121,7 @@ letter-spacing:.02em;white-space:nowrap;font-feature-settings:'vert'}}
 {''.join(svg)}</svg>{''.join(divs)}</div></body></html>'''
 
 
-def render_layer(page):
+def render_layer(page, draft_size=None):
     from playwright.sync_api import sync_playwright
 
     # Runtime files stay in ignored repository-local storage. Nothing is downloaded.
@@ -131,12 +134,16 @@ def render_layer(page):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(downloads_path=str(runtime), timeout=30000)
             try:
-                tab = browser.new_page(viewport={"width": page.width, "height": page.height},
+                width, height = draft_size or (page.width, page.height)
+                tab = browser.new_page(viewport={"width": width, "height": height},
                                        device_scale_factor=1, locale="ja-JP")
                 tab.route("**/*", lambda route: route.abort())
                 tab.set_default_timeout(30000)
-                tab.set_content(build_html(page), wait_until="load")
+                tab.set_content(build_html(page, draft_size), wait_until="load")
                 tab.evaluate("() => document.fonts.ready")
+                if draft_size is not None:
+                    data = tab.screenshot(type="png", omit_background=True, animations="disabled", timeout=30000)
+                    return Image.open(io.BytesIO(data)).convert("RGBA"), []
                 measured = tab.evaluate('''() => [...document.querySelectorAll('[data-line]')].map(d => {
                     const s = d.firstElementChild.getBoundingClientRect(), b = d.getBoundingClientRect();
                     const stroke = parseFloat(getComputedStyle(d).webkitTextStrokeWidth) || 0;

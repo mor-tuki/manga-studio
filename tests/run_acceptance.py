@@ -85,6 +85,9 @@ class Acceptance(unittest.TestCase):
             raise AssertionError(report)
         for number in (2, 3, 4):
             name = f"p{number:02d}" if number < 4 else "p04-05"
+            cls.command("review", number)
+            cls.command("approve", number)
+            cls.specs[number]["name_ok"] = True
             cls.command("cut", number, "--draft", cls.work / name / "draft_source.png", "--overlay")
             cls.command("draw", number, "--engine", "dummy", "--seed", 17)
             for panel in cls.specs[number]["panels"]:
@@ -92,10 +95,41 @@ class Acceptance(unittest.TestCase):
             cls.command("build", number)
         cls.command("check")
         cls.command("export")
-        print("\nPASS plan → cut --overlay → draw(dummy) → pick → build → check → export", flush=True)
+        print("\nPASS plan → review → approve → cut --overlay → draw(dummy) → pick → build → check → export",
+              flush=True)
 
     def restore_book(self):
         put(self.book_path, self.book)
+
+    def test_review_outputs_and_build_approval_gate(self):
+        folder = self.work / "p02"
+        lettered, overlay = [folder / name for name in ("review_name.png", "review_overlay.png")]
+        for output in (lettered, overlay):
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertLessEqual(max(image.size), 2000)
+            self.assertLessEqual(output.stat().st_size, 1_000_000)
+        with Image.open(lettered) as image:
+            self.assertTrue(0 < image.getextrema()[0] < 255)
+        with Image.open(overlay) as image:
+            self.assertEqual(image.getpixel((96, 72)), (190, 39, 39))
+
+        path = folder / "page.json"
+        put(path, dict(self.specs[2], name_ok=False))
+        original = path.read_bytes()
+        source = folder / "draft_source.png"
+        source_hash = file_hash(source)
+        try:
+            self.command("review", 2, "--draft", source)
+            self.assertEqual(file_hash(source), source_hash)
+            self.assertEqual(path.read_bytes(), original)
+            result = self.command("build", 2, ok=False)
+            self.assertIn("警告: ネーム未承認", result.stderr)
+            self.command("build", 2, "--force")
+            self.assertEqual(path.read_bytes(), original)
+        finally:
+            self.command("approve", 2)
+            self.command("build", 2)
 
     def test_01_exact_png_format_dpi_and_background(self):
         for index in range(1, 5):

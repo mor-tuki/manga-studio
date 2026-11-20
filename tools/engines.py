@@ -251,7 +251,9 @@ def codex_prompt(scene, size, seed, has_refs, negative):
     roles = ("Use the attached character sheets for identity. " if has_refs else "")
     roles += ("Use the final attached image as the rough panel layout and camera reference. "
               "Apply the scene revision where it calls for changes to the layout. "
-              "Use black ink and grayscale screentones, with no dialogue or lettering.")
+              "Use black ink and grayscale screentones, with no dialogue or lettering. "
+              "Do not draw any frame, panel border, or white margin. "
+              "Extend the artwork all the way to every edge of the canvas.")
     return (f"{roles}\nTarget canvas ratio (width:height): {size[0]}:{size[1]}. "
             f"Reproducibility hint: {seed}.\nAvoid: {negative}.\nScene: {scene}")
 

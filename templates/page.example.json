@@ -1,6 +1,7 @@
 {
   "_comment": "1ページの台本（見本）。box と lines の座標は仕上がり枠に対する %（x, y, w, h）。裁ち切りは bleed に辺の名前で書く（左右が反転しても書き直さない）。",
   "page": 3,
+  "name_ok": false,
   "panels": [
     {
       "id": "k1",

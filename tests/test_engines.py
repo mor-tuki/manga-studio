@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from PIL import Image, PngImagePlugin
+from PIL import Image, ImageDraw, PngImagePlugin
 
 from tools import engines, studio
 
@@ -17,12 +17,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def png(size=(64, 48), fill=80, **metadata):
+    return encode_png(Image.new("L", size, fill), **metadata)
+
+
+def encode_png(image, **metadata):
     data = BytesIO()
     info = PngImagePlugin.PngInfo()
     for key, value in metadata.items():
         info.add_text(key, json.dumps(value))
-    Image.new("L", size, fill).save(data, format="PNG", pnginfo=info)
+    image.save(data, format="PNG", pnginfo=info)
     return data.getvalue()
+
+
+def framed_panel():
+    image = Image.new("L", (240, 160), 255)
+    draw = ImageDraw.Draw(image)
+    for inset, fill in ((2, 190), (3, 0), (4, 120), (5, 225)):
+        draw.rectangle((inset, inset, image.width - inset - 1, image.height - inset - 1),
+                       fill=fill)
+    draw.ellipse((30, 30, 150, 100), fill=80)
+    return image
 
 
 class EngineCommands(unittest.TestCase):
@@ -38,7 +52,7 @@ class EngineCommands(unittest.TestCase):
         self.folder.mkdir(parents=True)
         self.draft = self.folder / "draft.png"
         self.draft.write_bytes(png())
-        self.spec = {"page": 2, "panels": [{"id": "k1", "box": [10, 10, 80, 45],
+        self.spec = {"page": 2, "name_ok": True, "panels": [{"id": "k1", "box": [10, 10, 80, 45],
                                            "scene": "もとの場面", "seed": 17}]}
         studio.write_json(self.page, self.spec)
 
@@ -47,6 +61,22 @@ class EngineCommands(unittest.TestCase):
 
     def metadata(self, version):
         return studio.read_json(self.folder / f"v{version}.json")
+
+    def test_sdxl_requires_approval_for_draw_and_redo(self):
+        self.spec.pop("name_ok")
+        studio.write_json(self.page, self.spec)
+        with patch.object(engines, "run_sdxl", return_value=png()) as run:
+            self.command("draw", "--engine", "sdxl", expected=1)
+            run.assert_not_called()
+            self.command("draw", "--engine", "sdxl", "--size", "64x48", "--force")
+            self.assertEqual(studio.read_json(self.page), self.spec)
+            self.command("redo", "--scene", "未承認の場面", expected=1)
+            run.assert_called_once()
+            self.assertEqual(studio.read_json(self.page), self.spec)
+            self.assertEqual(studio.main(["approve", str(self.work), "2"]), 0)
+            self.assertEqual(studio.read_json(self.page), dict(self.spec, name_ok=True))
+            self.command("draw", "--engine", "sdxl", "--size", "64x48")
+            self.assertEqual(run.call_count, 2)
 
     def test_sdxl_duo_uses_config_and_disjoint_hooks(self):
         config = self.work / "engines.local.json"
@@ -167,8 +197,50 @@ class EngineCommands(unittest.TestCase):
             prompt, refs, work = run.call_args.args
             self.assertIn("もとの場面", prompt)
             self.assertIn("No blades", prompt)
+            self.assertIn("Do not draw any frame, panel border, or white margin.", prompt)
+            self.assertIn("every edge of the canvas", prompt)
             self.assertEqual((refs, work), ([ref, self.draft], self.work))
         self.assertEqual(self.metadata(1)["size"], [33, 44])
+
+    def test_codex_trims_frame_before_saving_version(self):
+        image = framed_panel()
+        self.spec.pop("name_ok")
+        studio.write_json(self.page, self.spec)
+        with patch.object(engines, "run_codex", return_value=encode_png(image)):
+            self.command("draw", "--engine", "codex")
+        path = self.folder / "v1.png"
+        with Image.open(path) as saved:
+            self.assertEqual(saved.tobytes(), image.crop((5, 5, 235, 155)).tobytes())
+        self.assertEqual(self.metadata(1)["size"], [230, 150])
+        self.assertEqual(self.metadata(1)["image_sha256"], studio.sha(path))
+
+    def test_import_trims_frame_and_preserves_comfy_metadata_and_ph3_lineage(self):
+        source = self.work / "framed.png"
+        workflow = {"extra": {"manga_studio": {"contains_ph3": True}}}
+        graph = {"1": {"class_type": "PH3ImageConditioning"}}
+        original = encode_png(framed_panel(), workflow=workflow, prompt=graph)
+        source.write_bytes(original)
+        self.command("import", source)
+        self.assertEqual(source.read_bytes(), original)
+        record = self.metadata(1)
+        self.assertEqual(record["size"], [230, 150])
+        self.assertTrue(record["contains_ph3"])
+        with Image.open(self.folder / "v1.png") as saved:
+            self.assertEqual(saved.size, (230, 150))
+            self.assertEqual(studio.png_metadata(saved, "workflow"), workflow)
+            self.assertEqual(studio.png_metadata(saved, "prompt"), graph)
+
+    def test_trim_leaves_isolated_ink_and_thick_rectangles_in_place(self):
+        for thickness in (None, 12):
+            with self.subTest(thickness=thickness):
+                image = Image.new("L", (240, 160), 255)
+                draw = ImageDraw.Draw(image)
+                if thickness is None:
+                    draw.line((0, 1, image.width, 1), fill=0, width=2)
+                else:
+                    draw.rectangle((0, 0, 239, 159), outline=0, width=thickness)
+                data = encode_png(image)
+                self.assertEqual(studio.trim_panel_frame(data), data)
 
     def test_redo_compares_selected_and_keeps_pick(self):
         for fill in (30, 55):
