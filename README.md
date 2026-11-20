@@ -91,7 +91,8 @@ python -X utf8 tests/run_acceptance.py
 
 - SDXL は各自の PC に ComfyUI と使用権のあるモデルを用意します。チェックポイントは `models/checkpoints/`、LoRA は `models/loras/` に置き、起動済みの ComfyUI を `http://127.0.0.1:8188` で使います。2人用の Hook ノードを含む ComfyUI 本体が必要です。起動・終了やモデルの導入は各自で行います。
 - `config/engines.json` の `sdxl.checkpoint` と `sdxl.loras` を参照します。変更する場合はローカル設定へコピーし、`MANGA_STUDIO_ENGINES` にその相対パスを設定してください。LoRA はキャラクター ID ごとの `file` と `trigger` です。各ファイル名は手元の環境に合わせます。設定にあるモデル本体は各自で用意します。
-- SDXL は切り出したコマを I2I で描き直します。denoise は **0.55**〔実測：ローカル生成手順 §5.7〕。画像サイズの既定はコマの縦横比で約 **1MP**、SDXL の `--size` は幅・高さとも **8px** の倍数です〔実装値：VAE の空間圧縮単位〕。2人のコマでは `characters`（従来の `chars` も可）を下絵の**左→右**の順に書きます。2人を左右に分け、中央に両方の LoRA がかからない隙間を作ります。3人以上のコマは Codex を選びます。
+- SDXL は切り出したコマを I2I で描き直します。denoise の既定は **0.55**〔実測：ローカル生成手順 §5.7〕。画像サイズの既定はコマの縦横比で約 **1MP**、SDXL の `--size` は幅・高さとも **8px** の倍数です〔実装値：VAE の空間圧縮単位〕。2人のコマでは `characters`（従来の `chars` も可）を下絵の**左→右**の順に書きます。2人を左右に分け、中央に両方の LoRA がかからない隙間を作ります。3人以上のコマは Codex を選びます。
+- 棒人間の下絵では 0.55 で棒線が残ることがあります。コマごとに `page.json` の `sdxl.denoise`（0 より大きく 1 以下）を指定できます。`sdxl.regional_prompts` は2人のコマでキャラクター ID ごとに服装や向きを指定するオブジェクトです。場面全体は `scene` に書きます。`sdxl.negative_prompt` は既定のネガティブプロンプトに足す文字列です。これらの設定は `draw`、`redo`、`comfy` に共通で、実際に使った denoise は版の JSON と `log.jsonl` に残ります。
 - Codex は image_gen が利用できる CLI とログイン済みのアカウントが必要です。Windows で自動検出できない場合は `MANGA_STUDIO_CODEX` に `codex.exe` を設定します。登録済みの参照シートとコマの下絵を Codex のサービスに渡します。各コマを順に実行し、終了したセッションにある PNG を1枚だけ回収します。画像生成の実寸は出力を記録します。縦横比と seed は指示に含めます。
 - Codex へ渡すニケちゃんの参照画像は公式三面図だけです。`refs.json` の該当項目を `approved: true`、`kind: "official_turnaround"` とし、`files` にそのファイルを登録します。
 

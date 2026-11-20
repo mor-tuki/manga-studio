@@ -32,7 +32,8 @@ def sdxl_size(width, height):
                  for axis in (width, height))
 
 
-def sdxl_workflow(config, characters, draft, size, seed, prompt, negative, prefix):
+def sdxl_workflow(config, characters, draft, size, seed, prompt, negative, prefix,
+                  *, denoise=DENOISE, regional_prompts=None):
     """Return the API graph and named PNG assets for the same I2I workflow."""
     if len(characters) > 2:
         raise ValueError("SDXL の左右 Hook は2人までです。3人以上は codex を指定してください")
@@ -69,7 +70,8 @@ def sdxl_workflow(config, characters, draft, size, seed, prompt, negative, prefi
     if len(characters) == 2:
         width, height = size
         # Leave a 4% full-width gap for the unhooked conditioning at the seam.
-        left_end, right_start = math.floor(width * 0.48), math.ceil(width * 0.52)
+        left_end, right_start = math.floor(width * 0.48), math.floor(width * 0.52)
+        regional_prompts = regional_prompts or {}
         regions = (("left", 0, left_end), ("right", right_start, width))
         pairs = []
         for char, (side, start, end) in zip(characters, regions):
@@ -80,8 +82,8 @@ def sdxl_workflow(config, characters, draft, size, seed, prompt, negative, prefi
             assets[mask_name] = png(mask)
             mask_node = node("LoadImageMask", image=mask_name, channel="red")
             hooks = node("CreateHookLoraModelOnly", lora_name=lora["file"], strength_model=1.0)
-            region = node("CLIPTextEncode", clip=clip,
-                          text=f"one character on the {side}, {lora['trigger']}, {prompt}")
+            regional_prompt = regional_prompts.get(char, f"one character on the {side}, {lora['trigger']}, {prompt}")
+            region = node("CLIPTextEncode", clip=clip, text=regional_prompt)
             pairs.append(node("PairConditioningSetProperties", positive_NEW=region, negative_NEW=bad,
                               strength=1.0, set_cond_area="default", mask=mask_node, hooks=hooks))
         left, right = pairs
@@ -97,7 +99,7 @@ def sdxl_workflow(config, characters, draft, size, seed, prompt, negative, prefi
     latent = node("VAEEncode", pixels=scaled, vae=vae)
     sampled = node("KSampler", model=model, seed=seed, steps=28, cfg=5.0,
                    sampler_name="euler_ancestral", scheduler="normal", positive=good,
-                   negative=bad, latent_image=latent, denoise=DENOISE)
+                   negative=bad, latent_image=latent, denoise=denoise)
     decoded = node("VAEDecode", samples=sampled, vae=vae)
     node("SaveImage", images=decoded, filename_prefix=prefix)
     return graph, assets

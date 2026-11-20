@@ -434,10 +434,11 @@ def save_version(p, panel, record, art=None, started=None):
                                 "box_aspect_ratio": w * p.trim_width / (h * p.book.th),
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                                 "image_sha256": sha(art_path)}))
+    sampling = {"denoise": record["denoise"]} if "denoise" in record else {}
     log_panel(folder, {"event": "draw" if record["source"] == "chat" else "import",
                        "version": k, "engine": record["engine"], "seed": record["seed"],
                        "prompt": record["prompt"], "regional_prompts": record.get("regional_prompts", []),
-                       "elapsed_seconds": round(time.monotonic() - started, 3) if started else None})
+                       "elapsed_seconds": round(time.monotonic() - started, 3) if started else None, **sampling})
     action = "draw" if record["source"] == "chat" else "import"
     print(f"OK {action} {p.folder.name}/{panel['id']}/v{k} {dims[0]}×{dims[1]}")
     return k
@@ -621,11 +622,13 @@ def prepare_draw(p, panel, engine, seed=None, size=None):
     shot = str(panel.get("shot", "")).strip()
     if shot:
         scene += "\nCamera framing: " + shot + "."
-    scene += "\nIf a prop is needed, use a plain wooden staff for Nike-chan. No blades."
     if engine == "codex":
+        scene += "\nIf a prop is needed, use a plain wooden staff for Nike-chan. No blades."
         prompt = engines.codex_prompt(scene, size, seed, len(refs) > 1, NEGATIVE_PROMPT)
     else:
         prompt = "monochrome, grayscale manga, ink, screentones, " + scene
+        if NIKE_IDS.intersection(chars):
+            prompt += "\nNike-chan holds only a plain wooden staff with blunt wooden ends if she needs a prop."
     record = {"engine": engine, "seed": seed, "size": list(size),
               "prompt": prompt + "\n" + ALL_AGES_SUFFIX, "negative_prompt": NEGATIVE_PROMPT,
               "references_sha256": refs, "source": "chat", **lineage}
@@ -640,10 +643,38 @@ def prepare_sdxl(p, panel, record, chars, draft):
                 and axis % engines.SDXL_GRID == 0 for axis in size)
             and size[0] * size[1] <= Image.MAX_IMAGE_PIXELS,
             "SDXL の --size には8の倍数で画像上限内の寸法を指定してください")
+    options = panel.get("sdxl", {})
+    require(isinstance(options, dict), "sdxl はオブジェクトで指定してください")
+    denoise = options.get("denoise", engines.DENOISE)
+    require(type(denoise) in (int, float) and 0 < denoise <= 1,
+            "sdxl.denoise は 0 より大きく 1 以下の数にしてください")
+    negative = options.get("negative_prompt", "")
+    require(isinstance(negative, str), "sdxl.negative_prompt は文字列で指定してください")
+    negatives = [negative.strip(), record["negative_prompt"]]
+    if NIKE_IDS.intersection(chars):
+        negatives.append("bladed staff, spearhead, axe head")
+    negative = ", ".join(filter(None, negatives))
+
+    regions = options.get("regional_prompts", {})
+    require(isinstance(regions, dict) and (not regions or len(chars) == 2)
+            and regions.keys() <= set(chars),
+            "sdxl.regional_prompts は2人のコマでキャラクター ID をキーに指定してください")
+    prompts = {}
+    for char, text in regions.items():
+        require(isinstance(text, str) and text.strip(),
+                "sdxl.regional_prompts には空でない文字列を指定してください")
+        text = text.strip()
+        trigger = config["loras"].get(char, {}).get("trigger")
+        if trigger and trigger not in [tag.strip() for tag in text.split(",")]:
+            text = f"{trigger}, {text}"
+        if char in NIKE_IDS:
+            text += "\nIf holding a prop, use a plain wooden staff with two blunt wooden ends."
+        prompts[char] = f"{text}\n{ALL_AGES_SUFFIX}"
+
     work = re.sub(r'[^\w .-]', "_", p.book.root.name).strip(". ") or "work"
     prefix = f"manga-studio/{work}/{p.folder.name}/{panel['id']}"
     graph, assets = engines.sdxl_workflow(config, chars, draft, size, record["seed"], record["prompt"],
-                                        record["negative_prompt"], prefix)
+                                        negative, prefix, denoise=denoise, regional_prompts=prompts)
     draft_name = next(iter(assets))
     require(hashlib.sha256(assets[draft_name]).hexdigest()
             == record["references_sha256"][draft.relative_to(p.book.root).as_posix()],
@@ -677,6 +708,9 @@ def sampler_settings(graph):
         return [text for key in keys for text in linked_text(values.get(key), seen)]
 
     result = {"seed": sampler.get("seed")}
+    denoise = sampler.get("denoise")
+    if type(denoise) in (int, float) and 0 <= denoise <= 1:
+        result["denoise"] = denoise
     for key, field in (("positive", "prompt"), ("negative", "negative_prompt")):
         prompts = list(dict.fromkeys(linked_text(sampler.get(key), set())))
         if prompts:

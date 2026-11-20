@@ -70,11 +70,17 @@ class EngineCommands(unittest.TestCase):
             hooks = [node["inputs"]["lora_name"] for node in graph.values()
                      if node["class_type"] == "CreateHookLoraModelOnly"]
             self.assertEqual(hooks, ["left.safetensors", "right.safetensors"])
-            for side, edge in (("left", 0), ("right", 63)):
-                data, = [data for name, data in assets.items() if name.endswith(f"_{side}.png")]
+            default = graph[sample["positive"][0]]["inputs"]
+            combined = graph[default["positive"][0]]["inputs"]
+            masks = (("A", "left", (0, 0, 30, 48)), ("B", "right", (33, 0, 64, 48)))
+            for side, char, bounds in masks:
+                pair = graph[combined[f"positive_{side}"][0]]["inputs"]
+                self.assertEqual(pair["set_cond_area"], "default")
+                self.assertEqual(graph[pair["hooks"][0]]["inputs"]["lora_name"], f"{char}.safetensors")
+                mask_name = graph[pair["mask"][0]]["inputs"]["image"]
+                data = assets[mask_name]
                 with Image.open(BytesIO(data)) as mask:
-                    self.assertEqual(mask.getpixel((edge, 24)), 255)
-                    self.assertEqual(mask.getpixel((32, 24)), 0)
+                    self.assertEqual(mask.getbbox(), bounds)
             self.assertFalse(provenance["contains_ph3"])
             return png()
 
@@ -89,6 +95,47 @@ class EngineCommands(unittest.TestCase):
         log = json.loads((self.folder / "log.jsonl").read_text(encoding="utf-8"))
         self.assertGreaterEqual(log["elapsed_seconds"], 0)
         self.assertEqual(log["version"], 1)
+        self.assertEqual(log["denoise"], 0.55)
+
+    def test_sdxl_panel_options_reach_sampler_and_version(self):
+        panel = self.spec["panels"][0]
+        panel["characters"] = ["nek", "nike"]
+        panel["sdxl"] = {"denoise": 0.72, "negative_prompt": "fused bodies",
+                         "regional_prompts": {"nike": "1girl, nike_battle, open hoodie"}}
+        studio.write_json(self.page, self.spec)
+
+        with patch.object(engines, "run_sdxl", return_value=png()) as run:
+            self.command("draw", "--engine", "sdxl", "--size", "64x48")
+        graph, _, _ = run.call_args.args
+        actual = studio.sampler_settings(graph)
+        self.assertEqual(actual["denoise"], 0.72)
+        self.assertIn(studio.NEGATIVE_PROMPT, actual["negative_prompt"])
+        self.assertIn("fused bodies", actual["negative_prompt"])
+        self.assertIn("bladed staff", actual["negative_prompt"])
+        left, right = actual["regional_prompts"]
+        self.assertTrue(left.startswith("one character on the left, nek_battle, "))
+        self.assertTrue(right.startswith("1girl, nike_battle, open hoodie"))
+        self.assertEqual(right.count("nike_battle"), 1)
+        self.assertIn("two blunt wooden ends", right)
+        self.assertTrue(right.endswith(studio.ALL_AGES_SUFFIX))
+        record = self.metadata(1)
+        self.assertEqual({key: record[key] for key in actual}, actual)
+        log = json.loads((self.folder / "log.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(log["denoise"], 0.72)
+
+    def test_invalid_sdxl_panel_options_stop_before_generation(self):
+        panel = self.spec["panels"][0]
+        panel["characters"] = ["nek", "nike"]
+        bad_options = ([], {"denoise": 0}, {"denoise": 1.1}, {"denoise": True},
+                       {"negative_prompt": []}, {"regional_prompts": {"unknown": "1girl"}},
+                       {"regional_prompts": {"nike": " "}})
+        with patch.object(engines, "run_sdxl") as run:
+            for options in bad_options:
+                with self.subTest(options=options):
+                    panel["sdxl"] = options
+                    studio.write_json(self.page, self.spec)
+                    self.command("draw", "--engine", "sdxl", expected=1)
+            run.assert_not_called()
 
     def test_sdxl_single_and_missing_draft(self):
         self.spec["panels"][0]["chars"] = ["nek"]
@@ -153,6 +200,8 @@ class EngineCommands(unittest.TestCase):
         self.assertEqual((event["previous_version"], event["engine"]), (1, "sdxl"))
 
     def test_comfy_exports_editable_graph_and_import_preserves_png(self):
+        self.spec["panels"][0]["sdxl"] = {"denoise": 0.65}
+        studio.write_json(self.page, self.spec)
         self.command("comfy", "--seed", 7, "--size", "64x48")
         workflow = studio.read_json(self.folder / "comfy_workflow.json")
         self.assertEqual(workflow["version"], 0.4)
@@ -161,6 +210,7 @@ class EngineCommands(unittest.TestCase):
         marker = workflow["extra"]["manga_studio"]
         self.assertEqual(studio.sha(self.folder / "comfy_inputs" / image), marker["input_sha256"][image])
         self.assertEqual(nodes["KSampler"]["widgets_values"][:2], [7, "fixed"])
+        self.assertEqual(nodes["KSampler"]["widgets_values"][-1], 0.65)
         self.assertEqual(nodes["ImageScale"]["widgets_values"][1:3], [64, 48])
         self.assertIn(f"/p02/k1", nodes["SaveImage"]["widgets_values"][0])
         by_id = {node["id"]: node for node in workflow["nodes"]}
@@ -170,7 +220,7 @@ class EngineCommands(unittest.TestCase):
         source = self.work / "from_comfy.png"
         graph = {
             "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "edited in ComfyUI"}},
-            "2": {"class_type": "KSampler", "inputs": {"seed": 9, "positive": ["1", 0]}},
+            "2": {"class_type": "KSampler", "inputs": {"seed": 9, "positive": ["1", 0], "denoise": 0.65}},
         }
         source.write_bytes(png(workflow=workflow, prompt=graph))
         self.command("import", source)
@@ -179,6 +229,7 @@ class EngineCommands(unittest.TestCase):
         record = self.metadata(1)
         self.assertEqual((record["source"], record["seed"], record["prompt"]),
                          ("comfy", 9, "edited in ComfyUI"))
+        self.assertEqual(record["denoise"], 0.65)
 
     def test_ph3_origin_survives_import_copy_cut_and_blocks_codex(self):
         source = self.work / "ph3.png"
