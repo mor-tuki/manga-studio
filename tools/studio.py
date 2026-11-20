@@ -1,22 +1,28 @@
-"""Local dummy-only manga production CLI. See README for the on-disk contract."""
+"""Manga production CLI. See README for the on-disk contract."""
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
+import time
+from uuid import uuid4
 import zipfile
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, PngImagePlugin
 
 try:
-    from .safety import ALL_AGES_SUFFIX, NEGATIVE_PROMPT, PH3_ALLOWED_PUBLISH
+    from . import engines
+    from .safety import ALL_AGES_SUFFIX, NEGATIVE_PROMPT, NIKE_IDS, PH3_ALLOWED_PUBLISH
 except ImportError:
-    from safety import ALL_AGES_SUFFIX, NEGATIVE_PROMPT, PH3_ALLOWED_PUBLISH
+    import engines
+    from safety import ALL_AGES_SUFFIX, NEGATIVE_PROMPT, NIKE_IDS, PH3_ALLOWED_PUBLISH
 
 REPO = Path(__file__).resolve().parents[1]
 VERSION = 1
@@ -298,9 +304,13 @@ def open_image(path):
         return source.copy()
 
 
-def save_png(image, path, exclusive=False):
+def save_png(image, path, exclusive=False, lineage=None):
+    info = None
+    if lineage and (lineage["contains_ph3"] or lineage["derived_from"]):
+        info = PngImagePlugin.PngInfo()
+        info.add_text("manga_studio", json.dumps(lineage, ensure_ascii=True))
     with Path(path).open("xb" if exclusive else "wb") as stream:
-        image.save(stream, format="PNG", dpi=(600, 600))
+        image.save(stream, format="PNG", dpi=(600, 600), pnginfo=info)
 
 
 def plan(book, page=None):
@@ -313,13 +323,17 @@ def plan(book, page=None):
             print(f"{p.folder.name}\t{panel['id']}\t{w}×{h}\t{max(w / 1024, h / 1024):.6f}")
 
 
-def cut(book, page, draft, pad=4, overlay=False):
+def cut(book, page, draft, pad=4, overlay=False, parents=()):
     p = Page(book, book.group(page))
     number(pad, "pad")
     require(pad <= 100, "pad は100以下にしてください")
     draft = Path(draft).resolve()
     require(draft.is_relative_to(book.root), "下書きは作品フォルダ内に置いてください")
-    image = open_image(draft).convert("RGB")
+    data = draft.read_bytes()
+    with Image.open(BytesIO(data)) as source:
+        image = source.convert("RGB")
+    lineage = image_lineage(book, draft, parents, data)
+    verify_generation_policy(book, None, lineage["contains_ph3"])
     targets = [p.panel_dir(panel["id"]) / "draft.png" for panel in p.panels]
     if overlay:
         targets.append(p.folder / "draft_overlay.png")
@@ -338,36 +352,95 @@ def cut(book, page, draft, pad=4, overlay=False):
                   min(image.height, math.ceil((y + h + dy) * image.height / 100)))
         require(padded[2] > padded[0] and padded[3] > padded[1], "下書きのコマが1px未満です")
         target.parent.mkdir(parents=True, exist_ok=True)
-        save_png(image.crop(padded), target, exclusive=True)
+        save_png(image.crop(padded), target, exclusive=True, lineage=lineage)
         draw.rectangle(rect, outline="red", width=max(1, round(image.width / 400)))
         draw.text((rect[0] + 2, rect[1] + 2), panel["id"], fill="red")
     if overlay:
-        save_png(marked, p.folder / "draft_overlay.png", exclusive=True)
+        save_png(marked, p.folder / "draft_overlay.png", exclusive=True, lineage=lineage)
     print(f"OK cut {p.folder.name}: {len(p.panels)} コマ")
 
 
-def references(book, p, panel):
+def characters(panel):
+    chars = panel.get("characters", panel.get("chars", []))
+    require("chars" not in panel or panel["chars"] == chars, "chars と characters が一致しません")
+    require(isinstance(chars, list) and all(isinstance(char, str) and char for char in chars),
+            "characters はキャラクターIDの配列です")
+    require(len(set(chars)) == len(chars), "キャラクターIDが重複しています")
+    return chars
+
+
+def references(book, p, panel, *, codex=False):
     result = {}
-    registry_path = book.root / "refs.json"
-    chars = panel.get("chars", [])
-    require(isinstance(chars, list), "chars は配列です")
-    registry = read_json(registry_path) if chars else {}
+    chars = characters(panel)
+    registry = read_json(book.root / "refs.json") if chars else {}
     for char in chars:
-        require(char in registry, "未登録のキャラクター参照です: " + str(char))
+        require(char in registry, "未登録のキャラクター参照です: " + char)
         entry = registry[char]
-        if isinstance(entry, dict):
-            require(entry.get("approved") is True, "参照は approved=true の登録が必要です")
-            files = entry["files"]
-        else:
-            raise StudioError("refs.json は {id: {approved: true, files: [相対パス]}} 形式です")
+        require(isinstance(entry, dict) and entry.get("approved") is True,
+                "参照は approved=true の登録が必要です")
+        if codex and char in NIKE_IDS:
+            require(entry.get("kind") == "official_turnaround",
+                    "ニケちゃんの参照には公式三面図を kind=official_turnaround で登録してください")
+        files = entry["files"]
         require(isinstance(files, list) and files, "参照ファイルが空です")
         for name in files:
             path = inside(book.root, name)
             result[path.relative_to(book.root).as_posix()] = sha(path)
-    draft = p.panel_dir(panel["id"]) / "draft.png"
+    draft = inside(p.panel_dir(panel["id"]), "draft.png")
     if draft.exists():
-        result[draft.relative_to(book.root).as_posix()] = sha(draft)
+        relative = draft.relative_to(book.root).as_posix()
+        result.pop(relative, None)
+        result[relative] = sha(draft)
     return result
+
+
+def log_panel(folder, event):
+    line = json.dumps({"time": datetime.now(timezone.utc).isoformat(), **event},
+                      ensure_ascii=False, allow_nan=False)
+    # One append syscall also keeps each JSON line intact across CLI processes.
+    with (folder / "log.jsonl").open("ab", buffering=0) as stream:
+        stream.write((line + "\n").encode("utf-8"))
+
+
+def save_version(p, panel, record, art=None, started=None):
+    folder = p.panel_dir(panel["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    k = 1
+    while True:
+        metadata = folder / f"v{k}.json"
+        art_path = folder / f"v{k}.png"
+        if not art_path.exists():
+            try:
+                # The metadata file reserves the number, including on interruption.
+                stream = metadata.open("xb")
+                break
+            except FileExistsError:
+                pass
+        k += 1
+    with stream:
+        dims = tuple(record["size"])
+        if art is None:
+            image = Image.new("L", dims, 205)
+            painter = ImageDraw.Draw(image)
+            painter.text((max(1, dims[0] // 20), max(1, dims[1] // 20)),
+                         f"{panel['id']} v{k}", fill=0,
+                         font_size=max(12, min(96, min(dims) // 8)))
+            save_png(image, art_path, exclusive=True)
+        else:
+            with art_path.open("xb") as output:
+                output.write(art)
+        _, _, w, h = panel["box"]
+        stream.write(json_bytes({**record,
+                                "box_aspect_ratio": w * p.trim_width / (h * p.book.th),
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "image_sha256": sha(art_path)}))
+    log_panel(folder, {"event": "draw" if record["source"] == "chat" else "import",
+                       "version": k, "engine": record["engine"], "seed": record["seed"],
+                       "prompt": record["prompt"], "regional_prompts": record.get("regional_prompts", []),
+                       "elapsed_seconds": round(time.monotonic() - started, 3) if started else None})
+    action = "draw" if record["source"] == "chat" else "import"
+    print(f"OK {action} {p.folder.name}/{panel['id']}/v{k} {dims[0]}×{dims[1]}")
+    return k
 
 
 def draw_dummy(book, page, ids, seed=None, size=None):
@@ -385,39 +458,11 @@ def draw_dummy(book, page, ids, seed=None, size=None):
         refs = references(book, p, panel)
         prepared.append((panel, dims, refs))
     for panel, dims, refs in prepared:
-        folder = p.panel_dir(panel["id"])
-        folder.mkdir(parents=True, exist_ok=True)
-        k = 1
-        while True:
-            metadata = folder / f"v{k}.json"
-            if (folder / f"v{k}.png").exists():
-                k += 1
-                continue
-            try:
-                # The JSON filename is the reservation. Both files use O_EXCL;
-                # interrupted reservations stay on disk and are never reused.
-                stream = metadata.open("xb")
-                break
-            except FileExistsError:
-                k += 1
-        with stream:
-            image = Image.new("L", dims, 205)
-            painter = ImageDraw.Draw(image)
-            painter.text((max(1, dims[0] // 20), max(1, dims[1] // 20)),
-                         f"{panel['id']} v{k}", fill=0,
-                         font_size=max(12, min(96, min(dims) // 8)))
-            art_path = folder / f"v{k}.png"
-            save_png(image, art_path, exclusive=True)
-            x, y, w, h = panel["box"]
-            record = {"engine": "dummy", "seed": seed if seed is not None else panel.get("seed", 0),
-                      "prompt": str(panel.get("scene", "")) + "\n" + ALL_AGES_SUFFIX,
-                      "negative_prompt": NEGATIVE_PROMPT, "references_sha256": refs,
-                      "size": list(dims), "box_aspect_ratio": w * p.trim_width / (h * book.th),
-                      "source": "chat", "derived_from": [], "contains_ph3": False,
-                      "created_at": datetime.now(timezone.utc).isoformat(),
-                      "image_sha256": sha(art_path)}
-            stream.write(json_bytes(record))
-        print(f"OK draw {p.folder.name}/{panel['id']}/v{k} {dims[0]}×{dims[1]}")
+        record = {"engine": "dummy", "seed": seed if seed is not None else panel.get("seed", 0),
+                  "prompt": str(panel.get("scene", "")) + "\n" + ALL_AGES_SUFFIX,
+                  "negative_prompt": NEGATIVE_PROMPT, "references_sha256": refs,
+                  "size": list(dims), "source": "chat", **panel_lineage(p, panel, refs)}
+        save_version(p, panel, record, started=time.monotonic())
 
 
 def version_record(p, panel_id, k):
@@ -468,6 +513,318 @@ def ancestry(book, relative, visiting=None):
     return contains, hashes
 
 
+def verify_generation_policy(book, engine, contains_ph3):
+    if contains_ph3:
+        require(engine != "codex", "ph3 由来を codex に渡すことはできません")
+        require(set(book.data["publish"]).issubset(PH3_ALLOWED_PUBLISH),
+                "ph3 由来の画像はこの publish では処理できません")
+
+
+def lineage_record(book, parents, contains_ph3=False):
+    require(all(isinstance(path, str) for path in parents), "派生元は版 JSON の相対パスです")
+    parents = list(dict.fromkeys(inside(book.root, path).relative_to(book.root).as_posix()
+                                 for path in parents))
+    for parent in parents:
+        inherited, _ = ancestry(book, parent)
+        contains_ph3 |= inherited
+    return {"derived_from": parents, "contains_ph3": bool(contains_ph3)}
+
+
+def png_metadata(image, key):
+    try:
+        value = json.loads(image.info.get(key, "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def image_lineage(book, path, parents=(), data=None):
+    if data is None:
+        data = path.read_bytes()
+    file_hash = hashlib.sha256(data).hexdigest()
+    with Image.open(BytesIO(data)) as image:
+        graph = png_metadata(image, "prompt")
+        workflow = png_metadata(image, "workflow")
+        direct = png_metadata(image, "manga_studio")
+    extra = workflow.get("extra", {})
+    marker = extra.get("manga_studio", {}) if isinstance(extra, dict) else {}
+    require(isinstance(marker, dict), "PNG の manga_studio 来歴が不正です")
+    parents = [*parents, *direct.get("derived_from", []), *marker.get("derived_from", [])]
+    contains_ph3 = bool(direct.get("contains_ph3") or marker.get("contains_ph3"))
+    for node in graph.values():
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("class_type", "")).lower()
+        if node_type.startswith(("ph3image", "minimaxh3")):
+            contains_ph3 = True
+        for key in ("unet_name", "ckpt_name"):
+            inputs = node.get("inputs")
+            model = str(inputs.get(key, "")).lower() if isinstance(inputs, dict) else ""
+            if "p-h3" in model or "minimax_h3" in model:
+                contains_ph3 = True
+
+    # A renamed or copied immutable version still carries its recorded ancestry.
+    for meta in book.root.glob("p*/panels/*/v*.json"):
+        art = meta.with_suffix(".png")
+        try:
+            record = read_json(meta)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # A concurrent draw may have reserved the number but not committed it.
+            require(art.resolve() != path, "読み込む版のメタデータが未完成です")
+            continue
+        if art.resolve() == path:
+            require(record.get("image_sha256") == file_hash, "不変の版画像が変更されています")
+        if record.get("image_sha256") == file_hash:
+            parents.append(meta.relative_to(book.root).as_posix())
+    for manifest in book.root.glob("p*/build.json"):
+        record = read_json(manifest)
+        if file_hash in record.get("outputs_sha256", {}).values():
+            contains_ph3 |= bool(record.get("contains_ph3"))
+    return lineage_record(book, parents, contains_ph3)
+
+
+def panel_lineage(p, panel, refs):
+    parents = panel.get("derived_from", [])
+    require(isinstance(parents, list), "コマの derived_from は配列です")
+    contains_ph3 = bool(panel.get("contains_ph3"))
+    for relative in refs:
+        inherited = image_lineage(p.book, inside(p.book.root, relative))
+        parents = [*parents, *inherited["derived_from"]]
+        contains_ph3 |= inherited["contains_ph3"]
+    return lineage_record(p.book, parents, contains_ph3)
+
+
+def load_panel(book, page, panel_id):
+    p = Page(book, book.group(page))
+    panel = p.panel(panel_id)
+    require(panel is not None, "存在しないコマです: " + panel_id)
+    return p, panel
+
+
+def prepare_draw(p, panel, engine, seed=None, size=None):
+    draft = inside(p.panel_dir(panel["id"]), "draft.png")
+    require(draft.is_file(), f"{panel['id']}: draft.png がありません。先に cut を実行してください")
+    chars = characters(panel)
+    if engine == "codex":
+        refs = references(p.book, p, panel, codex=True)
+    else:
+        refs = {draft.relative_to(p.book.root).as_posix(): sha(draft)}
+    lineage = panel_lineage(p, panel, refs)
+    verify_generation_policy(p.book, engine, lineage["contains_ph3"])
+    seed = panel.get("seed", 0) if seed is None else seed
+    # KSampler accepts uint64, but its browser UI stores numbers as JS Number.
+    require(type(seed) is int and 0 <= seed <= (1 << 53) - 1,
+            "seed は 0〜9007199254740991 の整数です")
+    x, y, right, bottom = p.box(panel)
+    size = size or engines.sdxl_size(right - x, bottom - y)
+    scene = str(panel.get("scene", "")).strip()
+    shot = str(panel.get("shot", "")).strip()
+    if shot:
+        scene += "\nCamera framing: " + shot + "."
+    scene += "\nIf a prop is needed, use a plain wooden staff for Nike-chan. No blades."
+    if engine == "codex":
+        prompt = engines.codex_prompt(scene, size, seed, len(refs) > 1, NEGATIVE_PROMPT)
+    else:
+        prompt = "monochrome, grayscale manga, ink, screentones, " + scene
+    record = {"engine": engine, "seed": seed, "size": list(size),
+              "prompt": prompt + "\n" + ALL_AGES_SUFFIX, "negative_prompt": NEGATIVE_PROMPT,
+              "references_sha256": refs, "source": "chat", **lineage}
+    return record, chars, draft
+
+
+def prepare_sdxl(p, panel, record, chars, draft):
+    default = REPO / "config" / "engines.json"
+    config = read_json(os.environ.get("MANGA_STUDIO_ENGINES") or default)["sdxl"]
+    size = record["size"]
+    require(all(engines.SDXL_GRID <= axis <= engines.SDXL_MAX_AXIS
+                and axis % engines.SDXL_GRID == 0 for axis in size)
+            and size[0] * size[1] <= Image.MAX_IMAGE_PIXELS,
+            "SDXL の --size には8の倍数で画像上限内の寸法を指定してください")
+    work = re.sub(r'[^\w .-]', "_", p.book.root.name).strip(". ") or "work"
+    prefix = f"manga-studio/{work}/{p.folder.name}/{panel['id']}"
+    graph, assets = engines.sdxl_workflow(config, chars, draft, size, record["seed"], record["prompt"],
+                                        record["negative_prompt"], prefix)
+    draft_name = next(iter(assets))
+    require(hashlib.sha256(assets[draft_name]).hexdigest()
+            == record["references_sha256"][draft.relative_to(p.book.root).as_posix()],
+            "描画の準備中に下書きが変更されました。やり直してください")
+    record.update(sampler_settings(graph))
+    return graph, assets
+
+
+def sampler_settings(graph):
+    samplers = [node["inputs"] for node in graph.values()
+                if isinstance(node, dict) and node.get("class_type") == "KSampler"
+                and isinstance(node.get("inputs"), dict)]
+    if len(samplers) != 1:
+        return {}
+    sampler = samplers[0]
+
+    def linked_text(link, seen):
+        if not isinstance(link, list) or len(link) != 2:
+            return []
+        if not isinstance(link[0], str) or link[0] in seen:
+            return []
+        node = graph.get(link[0], {})
+        if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):
+            return []
+        values = node["inputs"]
+        if node.get("class_type") == "CLIPTextEncode":
+            return [values["text"]] if isinstance(values.get("text"), str) else []
+        seen.add(link[0])
+        keys = ("positive_DEFAULT", "positive", "positive_A", "positive_B", "positive_NEW") if link[1] == 0 else (
+            "negative_DEFAULT", "negative", "negative_A", "negative_B", "negative_NEW")
+        return [text for key in keys for text in linked_text(values.get(key), seen)]
+
+    result = {"seed": sampler.get("seed")}
+    for key, field in (("positive", "prompt"), ("negative", "negative_prompt")):
+        prompts = list(dict.fromkeys(linked_text(sampler.get(key), set())))
+        if prompts:
+            result[field] = prompts[0]
+        if key == "positive" and len(prompts) > 1:
+            result["regional_prompts"] = prompts[1:]
+    return result
+
+
+def draw(book, page, ids, engine, seed=None, size=None):
+    if engine == "dummy":
+        return draw_dummy(book, page, ids, seed, size)
+    require(engine in ("sdxl", "codex"), "未対応の描画エンジンです")
+    p = Page(book, book.group(page))
+    ids = ids or [panel["id"] for panel in p.panels]
+    require(len(ids) == len(set(ids)), "コマ指定が重複しています")
+    tasks = []
+    for panel_id in ids:
+        panel = p.panel(panel_id)
+        require(panel is not None, "存在しないコマです: " + panel_id)
+        record, chars, draft = prepare_draw(p, panel, engine, seed, size)
+        if engine == "sdxl":
+            payload = prepare_sdxl(p, panel, record, chars, draft)
+        else:
+            payload = [inside(book.root, path) for path in record["references_sha256"]]
+        tasks.append((panel, record, payload))
+    versions = []
+    for panel, record, payload in tasks:
+        started = time.monotonic()
+        print(f"描画中 {engine} {p.folder.name}/{panel['id']}", flush=True)
+        if engine == "sdxl":
+            graph, assets = payload
+            art = engines.run_sdxl(graph, assets, workflow_provenance(record, assets))
+        else:
+            require(all(sha(path) == expected for path, expected
+                        in zip(payload, record["references_sha256"].values())),
+                    "描画の準備中に参照画像が変更されました。やり直してください")
+            art = engines.run_codex(record["prompt"], payload, book.root)
+        actual = png_size(art)
+        if engine == "sdxl":
+            require(list(actual) == record["size"], "ComfyUI の出力寸法が指定と一致しません")
+        record["size"] = list(actual)
+        versions.append(save_version(p, panel, record, art, started))
+    return versions
+
+
+def workflow_provenance(record, assets):
+    return {key: record[key] for key in ("derived_from", "contains_ph3")} | {
+        "input_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in assets.items()}}
+
+
+def png_size(data):
+    with Image.open(BytesIO(data)) as image:
+        require(image.format == "PNG", "画像は PNG で指定してください")
+        image.load()
+        return image.size
+
+
+def atomic_json(path, value):
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        write_json(temporary, value, exclusive=True)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def comfy(book, page, panel_id, seed=None, size=None):
+    p, panel = load_panel(book, page, panel_id)
+    record, chars, draft = prepare_draw(p, panel, "sdxl", seed, size)
+    graph, assets = prepare_sdxl(p, panel, record, chars, draft)
+    folder = p.panel_dir(panel_id)
+    asset_folder = folder / "comfy_inputs"
+    asset_folder.mkdir(exist_ok=True)
+    for name, data in assets.items():
+        with (asset_folder / name).open("xb") as stream:
+            stream.write(data)
+    path = folder / "comfy_workflow.json"
+    atomic_json(path, engines.browser_workflow(graph, workflow_provenance(record, assets)))
+    print(f"OK comfy {path}（comfy_inputs/ の入力 PNG を ComfyUI の input/ にコピー）")
+
+
+def import_panel(book, page, panel_id, path, parents=(), ph3=False):
+    started = time.monotonic()
+    p, panel = load_panel(book, page, panel_id)
+    art = path.read_bytes()
+    size = png_size(art)
+    lineage = image_lineage(book, path.resolve(), parents, art)
+    lineage["contains_ph3"] |= ph3
+    verify_generation_policy(book, None, lineage["contains_ph3"])
+    with Image.open(BytesIO(art)) as image:
+        graph = png_metadata(image, "prompt")
+    record = {"engine": "comfy", "source": "comfy", "size": list(size), "seed": None,
+              "prompt": None, "negative_prompt": None, "references_sha256": {},
+              **sampler_settings(graph), **lineage}
+    save_version(p, panel, record, art, started)
+
+
+def previous_version(p, panel_id):
+    folder = p.panel_dir(panel_id)
+    selected = folder / "pick.json"
+    if selected.exists():
+        version = read_json(selected)["version"]
+        return version, version_record(p, panel_id, version)[0]
+    versions = []
+    for path in folder.glob("v*.json"):
+        match = re.fullmatch(r"v([1-9][0-9]*)", path.stem)
+        if match and path.stat().st_size and path.with_suffix(".png").is_file():
+            versions.append(int(match[1]))
+    require(versions, "比較する版がありません。先に draw または import を実行してください")
+    version = max(versions)
+    return version, version_record(p, panel_id, version)[0]
+
+
+def redo(book, page, panel_id, scene, engine=None, seed=None):
+    p, panel = load_panel(book, page, panel_id)
+    require(scene.strip(), "scene を空にはできません")
+    with engines.exclusive_edit(p.folder / ".redo.lock", "このページの redo が実行中です"):
+        # Re-read after acquiring the page lock, including edits to other panels.
+        p, panel = load_panel(book, page, panel_id)
+        previous, previous_art = previous_version(p, panel_id)
+        previous_meta = previous_art.with_suffix(".json").relative_to(book.root).as_posix()
+        old_ph3, _ = ancestry(book, previous_meta)
+        verify_generation_policy(book, None, old_ph3)
+        engine = engine or panel.get("engine", "sdxl")
+        require(engine in ("sdxl", "codex"), "redo の engine は sdxl または codex を指定してください")
+        before = panel.get("scene")
+        panel["scene"] = scene
+        atomic_json(p.path, p.data)
+        folder = p.panel_dir(panel_id)
+        log_panel(folder, {"event": "redo", "scene_before": before, "scene_after": scene,
+                           "previous_version": previous, "engine": engine})
+        version, = draw(book, page, [panel_id], engine, seed)
+        new_art, new_meta, _ = version_record(p, panel_id, version)
+        new_ph3, _ = ancestry(book, new_meta.relative_to(book.root).as_posix())
+        images = [open_image(path).convert("RGB") for path in (previous_art, new_art)]
+        for image in images:
+            image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        old, new = images
+        comparison = Image.new("RGB", (old.width + new.width, max(old.height, new.height)), "white")
+        comparison.paste(old, (0, 0))
+        comparison.paste(new, (old.width, 0))
+        path = folder / f"compare_v{version}.png"
+        save_png(comparison, path, exclusive=True,
+                 lineage={"contains_ph3": old_ph3 or new_ph3, "derived_from": []})
+        print(f"OK redo {path}（左 v{previous}、右 v{version}）")
+
+
 def inputs(p, warn=False):
     book = p.book
     panels = []
@@ -516,7 +873,7 @@ def check_attribution(p, contains_ph3=False):
     requirements = p.book.data.get("required_notices", [])
     require(isinstance(requirements, list) and all(isinstance(x, str) and x for x in requirements),
             "required_notices は空でない文字列の配列です")
-    chars = {c for panel in p.panels for c in panel.get("chars", [])}
+    chars = {c for panel in p.panels for c in characters(panel)}
     if chars.intersection({"nike", "nikechan", "AIニケちゃん"}):
         requirements = list(requirements) + ["非公式のファンメイド作品", "AIニケちゃん"]
     if contains_ph3:
@@ -568,9 +925,10 @@ def build(book, page):
     final.alpha_composite(layer)
     # Detect edits during rendering before publishing a build manifest.
     require(inputs(p) == snapshot, "組版中に入力が変わりました。再 build してください")
-    save_png(canvas, p.folder / "page_notext.png")
+    lineage = {"contains_ph3": snapshot["contains_ph3"], "derived_from": []}
+    save_png(canvas, p.folder / "page_notext.png", lineage=lineage)
     save_png(layer, p.folder / "letter_layer.png")
-    save_png(final.convert("L"), p.folder / "page.png")
+    save_png(final.convert("L"), p.folder / "page.png", lineage=lineage)
     snapshot["letter_bounds"] = bounds
     snapshot["outputs_sha256"] = {name: sha(p.folder / name)
                                    for name in ("page_notext.png", "letter_layer.png", "page.png")}
@@ -678,7 +1036,8 @@ def export(book):
     for index, number in enumerate(book.pages, 1):
         p = next(p for p in checked if number in p.group)
         name = f"{index:03d}.png"
-        save_png(split_page(p, number), out / name, exclusive=True)
+        lineage = {"contains_ph3": read_json(p.folder / "build.json")["contains_ph3"], "derived_from": []}
+        save_png(split_page(p, number), out / name, exclusive=True, lineage=lineage)
         check_image(out / name, (book.width, book.height))
         names.append(name)
         mapping.append({"file": name, "page": number, "sha256": sha(out / name),
@@ -711,9 +1070,9 @@ def parse_size(value):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="漫画を原寸グレー原稿と ZIP にする（dummy のみ）")
+    parser = argparse.ArgumentParser(description="漫画の描画・描き直しと原寸グレー原稿の書き出し")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "check", "export", "cut", "draw", "pick", "build"):
+    for name in ("plan", "check", "export", "cut", "draw", "redo", "comfy", "import", "pick", "build"):
         sub = commands.add_parser(name)
         sub.add_argument("work", type=Path)
         if name in ("plan", "check"):
@@ -726,11 +1085,22 @@ def main(argv=None):
             sub.add_argument("--pad", type=float, default=4)
         if name == "draw":
             sub.add_argument("ids", nargs="*")
-            sub.add_argument("--engine", choices=["dummy"], required=True)
-            sub.add_argument("--seed", type=int)
-            sub.add_argument("--size", type=parse_size)
-        if name == "pick":
+            sub.add_argument("--engine", choices=("dummy", "sdxl", "codex"), required=True)
+        if name in ("redo", "comfy", "import", "pick"):
             sub.add_argument("id")
+        if name == "redo":
+            sub.add_argument("--scene", required=True)
+            sub.add_argument("--engine", choices=("sdxl", "codex"))
+        if name in ("draw", "redo", "comfy"):
+            sub.add_argument("--seed", type=int)
+        if name in ("draw", "comfy"):
+            sub.add_argument("--size", type=parse_size)
+        if name in ("cut", "import"):
+            sub.add_argument("--derived-from", action="append", default=[], metavar="VERSION_JSON")
+        if name == "import":
+            sub.add_argument("png", type=Path)
+            sub.add_argument("--ph3", action="store_true", help="来歴情報を持たない P-H3 由来 PNG")
+        if name == "pick":
             sub.add_argument("version", type=int)
     args = parser.parse_args(argv)
     try:
@@ -738,9 +1108,15 @@ def main(argv=None):
         if args.command == "plan":
             plan(book, args.page)
         elif args.command == "cut":
-            cut(book, args.page, args.draft, args.pad, args.overlay)
+            cut(book, args.page, args.draft, args.pad, args.overlay, args.derived_from)
         elif args.command == "draw":
-            draw_dummy(book, args.page, args.ids, args.seed, args.size)
+            draw(book, args.page, args.ids, args.engine, args.seed, args.size)
+        elif args.command == "redo":
+            redo(book, args.page, args.id, args.scene, args.engine, args.seed)
+        elif args.command == "comfy":
+            comfy(book, args.page, args.id, args.seed, args.size)
+        elif args.command == "import":
+            import_panel(book, args.page, args.id, args.png, args.derived_from, args.ph3)
         elif args.command == "pick":
             pick(book, args.page, args.id, args.version)
         elif args.command == "build":

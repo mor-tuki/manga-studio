@@ -1,0 +1,10 @@
+{
+  "sdxl": {
+    "checkpoint": "animagine-xl-4.0-opt.safetensors",
+    "loras": {
+      "nek": {"file": "nek_battle_v1_s500.safetensors", "trigger": "nek_battle"},
+      "nike": {"file": "nike_battle_v1_s750.safetensors", "trigger": "nike_battle"},
+      "nek_queen": {"file": "nek_queen_v1_s750.safetensors", "trigger": "nek_queen"}
+    }
+  }
+}

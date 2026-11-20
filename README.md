@@ -31,18 +31,18 @@ AI で描く同人誌の漫画を、**入稿できる原稿**まで仕上げる�
 | `skills/03_lettering.md` | 写植の決まり（縦書き・読む順・吹き出しの種類） |
 | `skills/04_checklist.md` | 検収と入稿前のチェック表 |
 | `templates/` | プロンプトの型・page.json／book.json の見本 |
+| `config/engines.json` | SDXL のチェックポイントとキャラクター別 LoRA の設定 |
 
-## いまの状態（2026-11-18）
+## いまの状態（2026-11-20）
 
 - ✅ 手順・スキル・型（このリポジトリの中身）
-- ✅ 入稿コマンド `tools/studio.py`（今回の描画エンジンは `dummy` のみ）
+- ✅ `tools/studio.py` の入稿経路、SDXL／Codex のコマ描画と描き直し、ComfyUI 用の書き出しと取り込み
 - 数字には根拠を付けています〔実測／調査〕。未測定のものは「未測定」と書いています
 
 ## 使い方
 
 Python・Pillow・Playwright と Playwright の Chromium が導入済みの環境で使います。
-不足時は非ゼロ終了し、自動インストールやダウンロードは行いません。
-画像生成・ComfyUI・外部サービス送信は行いません。写植時のネットワーク要求も遮断します。
+不足時は非ゼロ終了します。写植時のネットワーク要求は遮断します。
 
 作品は Git 管理しない `local/` または `works/` に置いてください。
 `templates/book.example.json` を作品直下の `book.json`、
@@ -64,8 +64,11 @@ local/作品 テスト/
 | コマンド | 処理 |
 |---|---|
 | `plan <作品> [ページ]` | コマの原寸と正方形の下書きからの拡大率を一覧表示 |
-| `cut <作品> <ページ> --draft <PNG> [--overlay] [--pad %]` | 下書きを比率に依存しない百分率で切り出し、確認画像も作成 |
-| `draw <作品> <ページ> [id…] --engine dummy [--seed N] [--size WxH]` | 原寸または指定寸法のダミー画像を新しい版に追加 |
+| `cut <作品> <ページ> --draft <PNG> [--overlay] [--pad %] [--derived-from 版JSON]` | 下書きを百分率で切り出し、確認画像も作成 |
+| `draw <作品> <ページ> [id…] --engine <dummy・sdxl・codex> [--seed N] [--size WxH]` | コマを描いて新版に追加。コマ ID を省くと全コマを順に描画 |
+| `redo <作品> <ページ> <id> --scene "新しい場面" [--engine <sdxl・codex>] [--seed N]` | 台本を書き換え、新版と新旧の比較 PNG を作成 |
+| `comfy <作品> <ページ> <id> [--seed N] [--size WxH]` | ComfyUI で編集できる SDXL I2I のワークフロー JSON と入力 PNG を書き出す |
+| `import <作品> <ページ> <id> <PNG> [--derived-from 版JSON] [--ph3]` | ComfyUI で保存した PNG を新版として取り込む |
 | `pick <作品> <ページ> <id> <K>` | 使用する版を選択 |
 | `build <作品> <ページ>` | 原寸の組版・枠線・写植と履歴の記録 |
 | `check <作品> [ページ]` | 入稿仕様・安全域・鮮度・拡大率・派生元と公開先を検査 |
@@ -83,6 +86,26 @@ python -X utf8 tools/studio.py check "local/作品 テスト"
 python -X utf8 tools/studio.py export "local/作品 テスト"
 python -X utf8 tests/run_acceptance.py
 ```
+
+### メンバーの PC でコマを描く
+
+- SDXL は各自の PC に ComfyUI と使用権のあるモデルを用意します。チェックポイントは `models/checkpoints/`、LoRA は `models/loras/` に置き、起動済みの ComfyUI を `http://127.0.0.1:8188` で使います。2人用の Hook ノードを含む ComfyUI 本体が必要です。起動・終了やモデルの導入は各自で行います。
+- `config/engines.json` の `sdxl.checkpoint` と `sdxl.loras` を参照します。変更する場合はローカル設定へコピーし、`MANGA_STUDIO_ENGINES` にその相対パスを設定してください。LoRA はキャラクター ID ごとの `file` と `trigger` です。各ファイル名は手元の環境に合わせます。設定にあるモデル本体は各自で用意します。
+- SDXL は切り出したコマを I2I で描き直します。denoise は **0.55**〔実測：ローカル生成手順 §5.7〕。画像サイズの既定はコマの縦横比で約 **1MP**、SDXL の `--size` は幅・高さとも **8px** の倍数です〔実装値：VAE の空間圧縮単位〕。2人のコマでは `characters`（従来の `chars` も可）を下絵の**左→右**の順に書きます。2人を左右に分け、中央に両方の LoRA がかからない隙間を作ります。3人以上のコマは Codex を選びます。
+- Codex は image_gen が利用できる CLI とログイン済みのアカウントが必要です。Windows で自動検出できない場合は `MANGA_STUDIO_CODEX` に `codex.exe` を設定します。登録済みの参照シートとコマの下絵を Codex のサービスに渡します。各コマを順に実行し、終了したセッションにある PNG を1枚だけ回収します。画像生成の実寸は出力を記録します。縦横比と seed は指示に含めます。
+- Codex へ渡すニケちゃんの参照画像は公式三面図だけです。`refs.json` の該当項目を `approved: true`、`kind: "official_turnaround"` とし、`files` にそのファイルを登録します。
+
+```powershell
+python -X utf8 tools/studio.py draw "local/作品 テスト" 2 k1 --engine sdxl --seed 42
+python -X utf8 tools/studio.py draw "local/作品 テスト" 2 k2 --engine codex
+python -X utf8 tools/studio.py redo "local/作品 テスト" 2 k1 --scene "もっと引きで、二人が庭で話す" --engine sdxl
+python -X utf8 tools/studio.py comfy "local/作品 テスト" 2 k1
+python -X utf8 tools/studio.py import "local/作品 テスト" 2 k1 "local/ComfyUI出力.png"
+```
+
+`redo` は `log.jsonl` に場面の変更前後を記録し、描画成功時に `panels/<id>/compare_vK.png` を保存します。左は選択中の版（未選択なら最新の完成版）、右は新版です。初回は `draw` または `import` で比較元の版を作ります。エンジンを省略するとコマの `engine` を使い、未指定なら SDXL です。描画が失敗したときも新しい場面は台本に残り、`draw` で再試行できます。採用する版は `pick` で選びます。
+
+`comfy` の `panels/<id>/comfy_inputs/` にある PNG を ComfyUI の `input/` にコピーし、ブラウザで `comfy_workflow.json` を開きます。保存先の接頭辞は `manga-studio/<作品>/<ページ>/<id>` です。保存した PNG を `import` すると、PNG 内のワークフローも保持します。
 
 ### 寸法と左右
 
@@ -113,7 +136,7 @@ python -X utf8 tests/run_acceptance.py
 中断して残った予約も再利用しません。`pick.json` は選択変更時に更新します。
 `vK.json` にはエンジン・seed・固定文付き prompt・参照 SHA256・大きさ・
 box の比率・source・derived_from・作成日時・画像 SHA256 を保存します。
-dummy の `source` は `chat`、`derived_from` は空配列です。
+`draw` の `source` は `chat`、`import` は `comfy` です。`log.jsonl` は生成・取り込み・場面の変更を記録します。
 固定の全年齢文・ネガティブは `tools/safety.py` にあり、無効化する引数はありません。
 
 キャラクター参照は `refs.json` の登録制です。例：
@@ -127,9 +150,9 @@ dummy の `source` は `chat`、`derived_from` は空配列です。
 }
 ```
 
-`chars` の ID が未登録・未承認の場合は失敗します。
+Codex とダミーは `characters`／`chars` の指定がある場合に、未登録・未承認のキャラクター参照を拒否します。
 参照・派生元は作品内の相対パスだけを許可します。
-版に記録する参照はキャラクター画像と切り出した下書きのハッシュです。
+版に記録する参照は実際に使用したキャラクター画像や切り出した下書きのハッシュです。
 作品・画像・参照の登録簿を Git に追加しないでください。
 
 ### 組版と検査
@@ -151,7 +174,7 @@ box・lines・pick を変更したあとは必ず再 `build` してください�
 派生元は `derived_from` に作品内の版 JSON パスを列挙し、循環を拒否します。
 P-H3 由来は派生をたどって継承し、`print_jp` 以外の公開先を拒否します。
 未知の公開先も許可しません。P-H3 由来を codex に渡す版も拒否します。
-今回新たに作れるのは dummy の版だけです。
+編集で来歴が失われた PNG は `--derived-from` で元の版 JSON を指定します。元の版が作品内にない P-H3 由来の PNG は `import --ph3` で申告します。P-H3 由来の画像は `print_jp` の作品でのみ扱えます。
 
 `book.json` に任意の `required_notices: ["必要な表示", ...]` を指定すると、
 作品の先頭または最終原稿の安全域内の `lines` にその表示を必須にできます。
@@ -188,9 +211,9 @@ export でそれぞれ **3638×5102px** に切り、中央の **142px** を共�
 
 ### 受け入れテスト
 
-`python -X utf8 tests/run_acceptance.py` は標準ライブラリの unittest で実行します。
+`python -X utf8 -m unittest discover -s tests -v` で入稿経路と偽エンジンの全テストを実行します。
 pytest が導入済みなら `python -X utf8 -m pytest -q` でも同じ検査を実行できます。
 一時作品・画像・実行時ファイルは無視済みの `local/acceptance/` 配下に作り、削除しません。
 通常の右・左ページと見開きの全工程、再 build のハッシュ一致、古い台本・pick の拒否、
 拡大上限・安全域・参照・派生由来・排他的な版採番・ZIP の整合を検証します。
-印刷・画像の目視検収・実際の生成エンジンの品質は未測定です。
+偽エンジンでは Hook・Codex のセッション回収・描き直し・PNG の取り込みも検証します。印刷品質は未測定です。
