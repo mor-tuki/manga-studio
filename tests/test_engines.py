@@ -55,6 +55,14 @@ class EngineCommands(unittest.TestCase):
         self.spec = {"page": 2, "name_ok": True, "panels": [{"id": "k1", "box": [10, 10, 80, 45],
                                            "scene": "もとの場面", "seed": 17}]}
         studio.write_json(self.page, self.spec)
+        # Tests carry their own example config instead of the shared/local one.
+        config = self.work / "engines.test.json"
+        studio.write_json(config, {"sdxl": {"checkpoint": "test.safetensors", "loras": {
+            "nek": {"file": "nek_test.safetensors", "trigger": "nek_char"},
+            "nike": {"file": "nike_test.safetensors", "trigger": "nike_char"}}}})
+        env = patch.dict("os.environ", MANGA_STUDIO_ENGINES=str(config))
+        env.start()
+        self.addCleanup(env.stop)
 
     def command(self, name, *args, expected=0):
         self.assertEqual(studio.main([name, str(self.work), "2", "k1", *map(str, args)]), expected)
@@ -131,7 +139,7 @@ class EngineCommands(unittest.TestCase):
         panel = self.spec["panels"][0]
         panel["characters"] = ["nek", "nike"]
         panel["sdxl"] = {"denoise": 0.72, "negative_prompt": "fused bodies",
-                         "regional_prompts": {"nike": "1girl, nike_battle, open hoodie"}}
+                         "regional_prompts": {"nike": "1girl, nike_char, open hoodie"}}
         studio.write_json(self.page, self.spec)
 
         with patch.object(engines, "run_sdxl", return_value=png()) as run:
@@ -143,9 +151,9 @@ class EngineCommands(unittest.TestCase):
         self.assertIn("fused bodies", actual["negative_prompt"])
         self.assertIn("bladed staff", actual["negative_prompt"])
         left, right = actual["regional_prompts"]
-        self.assertTrue(left.startswith("one character on the left, nek_battle, "))
-        self.assertTrue(right.startswith("1girl, nike_battle, open hoodie"))
-        self.assertEqual(right.count("nike_battle"), 1)
+        self.assertTrue(left.startswith("one character on the left, nek_char, "))
+        self.assertTrue(right.startswith("1girl, nike_char, open hoodie"))
+        self.assertEqual(right.count("nike_char"), 1)
         self.assertIn("two blunt wooden ends", right)
         self.assertTrue(right.endswith(studio.ALL_AGES_SUFFIX))
         record = self.metadata(1)
@@ -176,7 +184,7 @@ class EngineCommands(unittest.TestCase):
             node_types = [node["class_type"] for node in graph.values()]
             self.assertIn("LoraLoaderModelOnly", node_types)
             self.assertNotIn("CreateHookLoraModelOnly", node_types)
-            self.assertTrue(self.metadata(1)["prompt"].startswith("nek_battle, "))
+            self.assertTrue(self.metadata(1)["prompt"].startswith("nek_char, "))
             self.draft.unlink()
             self.command("draw", "--engine", "sdxl", expected=1)
             run.assert_called_once()

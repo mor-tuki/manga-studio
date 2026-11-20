@@ -802,6 +802,7 @@ def prepare_draw(p, panel, engine, seed=None, size=None):
     shot = str(panel.get("shot", "")).strip()
     if shot:
         scene += "\nCamera framing: " + shot + "."
+    # ニケちゃんの「木の杖」の既定値はうちの例（ニケちゃんの小物の扱い）。自分のキャラの小物に書き替える。
     if engine == "codex":
         scene += "\nIf a prop is needed, use a plain wooden staff for Nike-chan. No blades."
         prompt = engines.codex_prompt(scene, size, seed, len(refs) > 1, NEGATIVE_PROMPT)
@@ -815,9 +816,17 @@ def prepare_draw(p, panel, engine, seed=None, size=None):
     return record, chars, draft
 
 
+def engines_config_path():
+    # MANGA_STUDIO_ENGINES > local/engines.local.json (git 管理外・自分のキャラ) > config/engines.json (例だけ)
+    env = os.environ.get("MANGA_STUDIO_ENGINES")
+    if env:
+        return env
+    local = REPO / "local" / "engines.local.json"
+    return local if local.exists() else REPO / "config" / "engines.json"
+
+
 def prepare_sdxl(p, panel, record, chars, draft):
-    default = REPO / "config" / "engines.json"
-    config = read_json(os.environ.get("MANGA_STUDIO_ENGINES") or default)["sdxl"]
+    config = read_json(engines_config_path())["sdxl"]
     size = record["size"]
     require(all(engines.SDXL_GRID <= axis <= engines.SDXL_MAX_AXIS
                 and axis % engines.SDXL_GRID == 0 for axis in size)

@@ -12,6 +12,7 @@ MANGA GRAMMAR (the most important part - follow all of these):
 
 TEXT RULES: all Japanese text is vertical (tategaki), spelled EXACTLY as given below, nothing added. Reading order is right to left, top to bottom: within a panel the first speaker and first balloon are on the RIGHT. No logos, no signature, no watermark. Nike-chan's T-shirt letters are hidden by her hoodie.
 
+# CHARACTERS はうちの例（ネクタリカ／ニケちゃんの外見）。自分のキャラに書き替える。（この行は Codex に渡す前に消してよい）
 CHARACTERS (recognizable in every panel even when simplified; reference images: first = Nectalica, second = Nike-chan; use them for design only, NOT for rendering style):
 - Nectalica: long wavy light hair to the middle of the back, braided crown half-updo (thin braid from each temple running to the back of the head) tied with a small bow at the back, big eyes. Frilly dark dress with a high closed collar (no cleavage), long sleeves, dark thigh-high stockings. Neat, perfectionist, polite smile.
 - Nike-chan: dark hair in a HIGH PONYTAIL that is clearly visible in every panel (long tail swinging behind her head) with a hair tie, small hair clip on her bangs shaped as the two capital letters "AI" (this "AI" clip is allowed and required text; draw it in every panel she appears in), ear cuff, open hoodie with a cow-print pattern (large irregular blob-shaped spots, NOT round polka dots) over a T-shirt, shorts. Her hair is deep purple (rendered dark in black and white). Polite, honest and bright.

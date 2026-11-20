@@ -8,6 +8,7 @@ NEGATIVE_PROMPT = (
     "text, watermark, signature"
 )
 
+# うちの例（AIニケちゃん）のキャラ ID。公式ガイドラインの表記・小物の決まりをかけるのに使う。自分のキャラに合わせて書き替える。
 NIKE_IDS = frozenset({"nike", "nikechan", "AIニケちゃん"})
 
 # Fail closed for unrecognised destinations when PH3 ancestry is present.
